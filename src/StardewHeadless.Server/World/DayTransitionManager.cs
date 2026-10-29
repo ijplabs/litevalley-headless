@@ -261,7 +261,7 @@ public static class DayTransitionManager
             byte[] payload = update.Serialize();
             foreach (long peerId in Game1.otherFarmers.Keys)
             {
-                server.sendMessage(peerId, new StardewValley.Network.OutgoingMessage(33, Game1.player.UniqueMultiplayerID, (object)payload));
+                server.sendMessage(peerId, new StardewValley.Network.OutgoingMessage(33, Game1.player?.UniqueMultiplayerID ?? 0, (object)payload));
             }
         }
 
@@ -269,17 +269,126 @@ public static class DayTransitionManager
         await StardewHeadless.Server.Professions.ProfessionLevelSyncService.SyncAllConnectedFarmersAsync(server, _databaseService);
     }
 
+    private static readonly Dictionary<long, (int gross, int tax, string name)> _pendingShippingTaxes = new();
+
+    /// <summary>
+    /// Prefix patch sebelum Game1.newDayAfterFade membersihkan shipping bin.
+    /// Mengumpulkan seluruh komoditas yang dikirim dan menghitung potongan pajak 5% Kas Desa.
+    /// </summary>
+    public static void NewDay_Prefix()
+    {
+        _pendingShippingTaxes.Clear();
+        try
+        {
+            var allFarmers = new List<Farmer>();
+            if (Game1.player != null) allFarmers.Add(Game1.player);
+            if (Game1.otherFarmers != null) allFarmers.AddRange(Game1.otherFarmers.Values);
+
+            var farm = Game1.getFarm();
+            foreach (var farmer in allFarmers)
+            {
+                var shippedItems = new List<Item>();
+                try
+                {
+                    if (farmer.personalShippingBin?.Value != null && farmer.personalShippingBin.Value.Count > 0)
+                    {
+                        shippedItems.AddRange(farmer.personalShippingBin.Value);
+                    }
+                    if (farm != null)
+                    {
+                        var bin = farm.getShippingBin(farmer);
+                        if (bin != null && bin.Count > 0)
+                        {
+                            foreach (var item in bin)
+                            {
+                                if (!shippedItems.Contains(item)) shippedItems.Add(item);
+                            }
+                        }
+                    }
+                }
+                catch { }
+
+                if (shippedItems.Count > 0)
+                {
+                    var (gross, tax, _) = CalculateShippingBinTax(shippedItems, farmer.UniqueMultiplayerID, VillageExportTaxRate);
+                    if (tax > 0)
+                    {
+                        _pendingShippingTaxes[farmer.UniqueMultiplayerID] = (gross, tax, farmer.Name);
+                    }
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger?.Error("DayTransition", "Exception saat kalkulasi NewDay_Prefix pajak ekspor", null, ex);
+        }
+    }
+
     public static void NewDay_Postfix()
     {
+        // 1. Potong pajak dari dompet masing-masing petani di main thread
+        int totalTaxCollected = 0;
+        string lastFarmer = "Petani Desa";
+
+        foreach (var (farmerId, taxInfo) in _pendingShippingTaxes)
+        {
+            Farmer? f = (Game1.player?.UniqueMultiplayerID == farmerId)
+                ? Game1.player
+                : (Game1.otherFarmers != null && Game1.otherFarmers.TryGetValue(farmerId, out var of) ? of : null);
+
+            if (f != null && taxInfo.tax > 0)
+            {
+                f.Money = Math.Max(0, f.Money - taxInfo.tax);
+                totalTaxCollected += taxInfo.tax;
+                lastFarmer = taxInfo.name;
+            }
+        }
+
+        var taxSnapshot = _pendingShippingTaxes.ToDictionary(k => k.Key, v => v.Value);
+        _pendingShippingTaxes.Clear();
+
         _ = Task.Run(async () =>
         {
             try
             {
-                await ProcessAllShippingTaxesAndBroadcastAsync(Game1.server);
+                if (_databaseService != null && taxSnapshot.Count > 0)
+                {
+                    foreach (var (farmerId, (gross, tax, name)) in taxSnapshot)
+                    {
+                        if (tax > 0)
+                        {
+                            var user = await _databaseService.GetUserByLinkedFarmerAsync(farmerId, name);
+                            await _databaseService.RecordTreasuryTransactionAsync(
+                                user?.Id,
+                                transactionType: "tax_export",
+                                amount: tax,
+                                notes: $"Pajak Ekspor {VillageExportTaxRate * 100:0.#}% dari penjualan ({gross}g) oleh '{name}'");
+                        }
+                    }
+                }
+
+                if (totalTaxCollected > 0 && Game1.server != null && Game1.otherFarmers != null && _databaseService != null)
+                {
+                    int newTreasuryBalance = await _databaseService.GetTreasuryBalanceAsync();
+                    var update = new StardewHeadless.Protocol.Packets.VillageTreasuryUpdatePacket
+                    {
+                        NewBalance = newTreasuryBalance,
+                        LastContributorName = lastFarmer,
+                        LastContributionAmount = totalTaxCollected
+                    };
+                    byte[] payload = update.Serialize();
+                    foreach (long peerId in Game1.otherFarmers.Keys)
+                    {
+                        Game1.server.sendMessage(peerId, new StardewValley.Network.OutgoingMessage(33, Game1.player?.UniqueMultiplayerID ?? 0, (object)payload));
+                    }
+                }
+
+                // Sinkronisasi SkillLevel seluruh petani yang terhubung dan bagikan buff perk 0xA0
+                await StardewHeadless.Server.Professions.ProfessionLevelSyncService.SyncAllConnectedFarmersAsync(Game1.server, _databaseService);
             }
             catch (Exception ex)
             {
-                _logger?.Error("DayTransition", "Gagal memproses pajak ekspor NewDay", null, ex);
+                _logger?.Error("DayTransition", "Gagal memproses pajak ekspor NewDay ke database", null, ex);
             }
         });
     }

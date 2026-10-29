@@ -1,5 +1,7 @@
 using System.IO;
 using System.Reflection;
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using HarmonyLib;
 using Microsoft.Xna.Framework;
 using Microsoft.Xna.Framework.Content;
@@ -355,28 +357,68 @@ public static class NullGraphicsHarness
             _logger?.Debug("Harness", "Patched RenderTarget2D.PlatformConstruct -> bypass render target GL creation");
         }
 
-        // 7b. Texture2D.SetData<T>, PlatformSetData<T>, GetData<T>, PlatformGetData<T>: bypass GL pixel transfer
-        var commonTypes = new[] { typeof(Color), typeof(byte), typeof(int), typeof(uint), typeof(Vector4) };
+        // 7b. Texture2D CPU Pixel Buffer hooks: memungkinkan ContentPatcher / SVE menjalankan EditImage / PatchImage tanpa GPU
+        var commonTypes = new[] { typeof(Color), typeof(byte), typeof(int), typeof(uint) };
         foreach (var m in typeof(Texture2D).GetMethods(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
         {
-            if ((m.Name == "SetData" || m.Name.StartsWith("PlatformSetData") || m.Name == "GetData" || m.Name.StartsWith("PlatformGetData")) && m.IsGenericMethodDefinition)
+            if (m.IsGenericMethodDefinition)
             {
-                foreach (var t in commonTypes)
+                var parameters = m.GetParameters();
+                if (m.Name == "PlatformSetData" && parameters.Length == 6)
                 {
-                    try
+                    foreach (var t in commonTypes)
                     {
-                        var closed = m.MakeGenericMethod(t);
-                        var prefix = AccessTools.Method(typeof(NullGraphicsHarness), nameof(Texture2D_Data_Prefix));
-                        _harmony!.Patch(closed, prefix: new HarmonyMethod(prefix));
+                        try
+                        {
+                            var closed = m.MakeGenericMethod(t);
+                            var prefix = typeof(NullGraphicsHarness).GetMethod(nameof(PlatformSetData_Rect_Prefix), BindingFlags.Public | BindingFlags.Static)!.MakeGenericMethod(t);
+                            _harmony!.Patch(closed, prefix: new HarmonyMethod(prefix));
+                        }
+                        catch { }
                     }
-                    catch
+                }
+                else if (m.Name == "PlatformSetData" && parameters.Length == 4)
+                {
+                    foreach (var t in commonTypes)
                     {
-                        // Ignore incompatible generic constraints
+                        try
+                        {
+                            var closed = m.MakeGenericMethod(t);
+                            var prefix = typeof(NullGraphicsHarness).GetMethod(nameof(PlatformSetData_NoRect_Prefix), BindingFlags.Public | BindingFlags.Static)!.MakeGenericMethod(t);
+                            _harmony!.Patch(closed, prefix: new HarmonyMethod(prefix));
+                        }
+                        catch { }
+                    }
+                }
+                else if (m.Name == "PlatformGetData" && parameters.Length == 6)
+                {
+                    foreach (var t in commonTypes)
+                    {
+                        try
+                        {
+                            var closed = m.MakeGenericMethod(t);
+                            var prefix = typeof(NullGraphicsHarness).GetMethod(nameof(PlatformGetData_Prefix), BindingFlags.Public | BindingFlags.Static)!.MakeGenericMethod(t);
+                            _harmony!.Patch(closed, prefix: new HarmonyMethod(prefix));
+                        }
+                        catch { }
+                    }
+                }
+                else if ((m.Name == "SetData" || m.Name.StartsWith("PlatformSetData") || m.Name == "GetData" || m.Name.StartsWith("PlatformGetData")))
+                {
+                    foreach (var t in commonTypes)
+                    {
+                        try
+                        {
+                            var closed = m.MakeGenericMethod(t);
+                            var prefix = AccessTools.Method(typeof(NullGraphicsHarness), nameof(Texture2D_Data_Prefix));
+                            _harmony!.Patch(closed, prefix: new HarmonyMethod(prefix));
+                        }
+                        catch { }
                     }
                 }
             }
         }
-        _logger?.Debug("Harness", "Patched Texture2D.SetData/GetData<T> -> bypass GL pixel transfer");
+        _logger?.Debug("Harness", "Patched Texture2D PlatformSetData/GetData<T> -> Zero-GPU CPU Pixel Buffer enabled");
 
         // 8. Texture2DReader.Read: seek stream past pixel data, return dummy sized Texture2D
         var texReaderType = AccessTools.TypeByName("Microsoft.Xna.Framework.Content.Texture2DReader");
@@ -392,9 +434,128 @@ public static class NullGraphicsHarness
         }
     }
 
+    public class CpuTextureBuffer
+    {
+        public byte[] Data { get; set; } = Array.Empty<byte>();
+        public int Width { get; set; }
+        public int Height { get; set; }
+    }
+
+    private static readonly ConditionalWeakTable<Texture2D, CpuTextureBuffer> _cpuPixelBuffers = new();
+    private static bool _selectiveCpuPixelBufferEnabled = true;
+
+    public static void EnableSelectiveCpuPixelBuffer(bool enable = true)
+    {
+        _selectiveCpuPixelBufferEnabled = enable;
+    }
+
+    public static byte[]? GetCpuPixels(Texture2D texture)
+    {
+        if (_cpuPixelBuffers.TryGetValue(texture, out var buf) && buf.Data.Length > 0)
+        {
+            return buf.Data;
+        }
+        return null;
+    }
+
+    public static void SetCpuPixels(Texture2D texture, byte[] pixels, int width = 0, int height = 0)
+    {
+        var buf = _cpuPixelBuffers.GetOrCreateValue(texture);
+        buf.Data = pixels;
+        buf.Width = width > 0 ? width : texture.Width;
+        buf.Height = height > 0 ? height : texture.Height;
+    }
+
     public static bool Texture2D_PlatformConstruct_Prefix() => false;
     public static bool RenderTarget2D_PlatformConstruct_Prefix() => false;
     public static bool Texture2D_Data_Prefix() => false;
+
+    public static bool PlatformSetData_Rect_Prefix<T>(Texture2D __instance, int level, int arraySlice, Rectangle rect, T[] data, int startIndex, int elementCount) where T : struct
+    {
+        if (!_selectiveCpuPixelBufferEnabled || data == null || elementCount <= 0) return false;
+
+        int w = __instance.Width;
+        int h = __instance.Height;
+        if (w <= 0 || h <= 0) return false;
+
+        var buf = _cpuPixelBuffers.GetOrCreateValue(__instance);
+        int totalBytes = w * h * 4;
+        if (buf.Data.Length != totalBytes)
+        {
+            buf.Data = new byte[totalBytes];
+            buf.Width = w;
+            buf.Height = h;
+        }
+
+        var sourceBytes = MemoryMarshal.AsBytes<T>(data.AsSpan(startIndex, elementCount));
+
+        if (rect.Width <= 0 || rect.Height <= 0 || (rect.X == 0 && rect.Y == 0 && rect.Width == w && rect.Height == h))
+        {
+            sourceBytes.Slice(0, Math.Min(sourceBytes.Length, buf.Data.Length)).CopyTo(buf.Data);
+        }
+        else
+        {
+            int bytesPerPixel = 4;
+            int rowBytes = rect.Width * bytesPerPixel;
+            int srcOffset = 0;
+            for (int row = 0; row < rect.Height && (rect.Y + row) < h; row++)
+            {
+                int dstOffset = ((rect.Y + row) * w + rect.X) * bytesPerPixel;
+                int copyLen = Math.Min(rowBytes, totalBytes - dstOffset);
+                if (srcOffset + copyLen <= sourceBytes.Length && copyLen > 0)
+                {
+                    sourceBytes.Slice(srcOffset, copyLen).CopyTo(buf.Data.AsSpan(dstOffset, copyLen));
+                }
+                srcOffset += rowBytes;
+            }
+        }
+
+        return false;
+    }
+
+    public static bool PlatformSetData_NoRect_Prefix<T>(Texture2D __instance, int level, T[] data, int startIndex, int elementCount) where T : struct
+    {
+        return PlatformSetData_Rect_Prefix(__instance, level, 0, new Rectangle(0, 0, __instance.Width, __instance.Height), data, startIndex, elementCount);
+    }
+
+    public static bool PlatformGetData_Prefix<T>(Texture2D __instance, int level, int arraySlice, Rectangle rect, T[] data, int startIndex, int elementCount) where T : struct
+    {
+        if (data == null || elementCount <= 0) return false;
+
+        var targetSpan = MemoryMarshal.AsBytes<T>(data.AsSpan(startIndex, elementCount));
+
+        if (_selectiveCpuPixelBufferEnabled && _cpuPixelBuffers.TryGetValue(__instance, out var buf) && buf.Data.Length > 0)
+        {
+            int w = __instance.Width;
+            int h = __instance.Height;
+            if (rect.Width <= 0 || rect.Height <= 0 || (rect.X == 0 && rect.Y == 0 && rect.Width == w && rect.Height == h))
+            {
+                buf.Data.AsSpan(0, Math.Min(buf.Data.Length, targetSpan.Length)).CopyTo(targetSpan);
+            }
+            else
+            {
+                int bytesPerPixel = 4;
+                int rowBytes = rect.Width * bytesPerPixel;
+                int dstOffset = 0;
+                for (int row = 0; row < rect.Height && (rect.Y + row) < h; row++)
+                {
+                    int srcOffset = ((rect.Y + row) * w + rect.X) * bytesPerPixel;
+                    int copyLen = Math.Min(rowBytes, buf.Data.Length - srcOffset);
+                    if (dstOffset + copyLen <= targetSpan.Length && copyLen > 0)
+                    {
+                        buf.Data.AsSpan(srcOffset, copyLen).CopyTo(targetSpan.Slice(dstOffset, copyLen));
+                    }
+                    dstOffset += rowBytes;
+                }
+            }
+        }
+        else
+        {
+            targetSpan.Clear();
+        }
+
+        return false;
+    }
 
     public static bool Texture2DReader_Read_Prefix(ContentReader reader, Texture2D existingInstance, ref Texture2D __result)
     {

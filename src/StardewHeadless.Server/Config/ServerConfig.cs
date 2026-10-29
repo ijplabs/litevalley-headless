@@ -111,6 +111,10 @@ public class ServerConfig
             config.FarmType = envFarmType;
         if (int.TryParse(Environment.GetEnvironmentVariable("STARTING_CABINS"), out int envCabins))
             config.StartingCabins = envCabins;
+        else if (int.TryParse(Environment.GetEnvironmentVariable("MAX_PLAYERS"), out int envMaxPlayers))
+            config.StartingCabins = envMaxPlayers;
+
+        config.StartingCabins = Math.Clamp(config.StartingCabins, 1, 16);
         if (bool.TryParse(Environment.GetEnvironmentVariable("SEPARATE_WALLETS"), out bool envWallets))
             config.UseSeparateWallets = envWallets;
 

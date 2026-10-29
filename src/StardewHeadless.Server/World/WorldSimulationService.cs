@@ -140,6 +140,7 @@ public static class WorldSimulationService
             {
                 harmony.Patch(
                     original: newDayMethod,
+                    prefix: new HarmonyMethod(typeof(DayTransitionManager), nameof(DayTransitionManager.NewDay_Prefix)),
                     postfix: new HarmonyMethod(typeof(DayTransitionManager), nameof(DayTransitionManager.NewDay_Postfix))
                 );
             }

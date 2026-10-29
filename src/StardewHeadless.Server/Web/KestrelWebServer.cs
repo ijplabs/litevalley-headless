@@ -943,11 +943,14 @@ public static class KestrelWebServer
         });
 
         // 9. Admin Force Save
-        app.MapPost("/api/admin/save", () =>
+        app.MapPost("/api/admin/save", async () =>
         {
             try
             {
-                SaveGame.Save();
+                await ServerHost.EnqueueMainThreadActionAsync(() =>
+                {
+                    SaveGame.Save();
+                });
                 _logger?.Info("AdminWeb", "Manual Force Save berhasil dieksekusi via Web Admin Portal.");
                 return Results.Ok(new { success = true, message = "World save berhasil dieksekusi." });
             }
@@ -959,7 +962,7 @@ public static class KestrelWebServer
         });
 
         // 10. Admin Create Fresh World
-        app.MapPost("/api/admin/world/create", (JsonElement body) =>
+        app.MapPost("/api/admin/world/create", async (JsonElement body) =>
         {
             string farmName = body.TryGetProperty("farmName", out var fn) ? fn.GetString() ?? "" : "";
             int farmType = body.TryGetProperty("farmType", out var ft) ? ft.GetInt32() : 0;
@@ -975,9 +978,12 @@ public static class KestrelWebServer
                 var config = _config ?? new ServerConfig();
                 config.FarmName = farmName.Trim();
                 config.FarmType = farmType;
-                config.StartingCabins = Math.Clamp(startingCabins, 1, 8);
+                config.StartingCabins = Math.Clamp(startingCabins, 1, 16);
 
-                var saveFolder = HeadlessWorldGenerator.CreateFreshWorld(config, _logger);
+                var saveFolder = await ServerHost.EnqueueMainThreadFuncAsync(() =>
+                {
+                    return HeadlessWorldGenerator.CreateFreshWorld(config, _logger);
+                });
                 _logger?.Info("AdminWeb", $"Dunia baru '{farmName}' berhasil dibuat via Admin Portal.");
                 return Results.Ok(new
                 {
@@ -997,7 +1003,7 @@ public static class KestrelWebServer
         });
 
         // 11. Admin Reset / Archive World
-        app.MapPost("/api/admin/world/reset", (JsonElement body) =>
+        app.MapPost("/api/admin/world/reset", async (JsonElement body) =>
         {
             string confirmFarmName = body.TryGetProperty("confirmFarmName", out var cfn) ? cfn.GetString() ?? "" : "";
             string newFarmName = body.TryGetProperty("newFarmName", out var nfn) ? nfn.GetString() ?? "" : "";
@@ -1018,12 +1024,15 @@ public static class KestrelWebServer
             {
                 var config = _config ?? new ServerConfig();
                 var targetFarmName = string.IsNullOrWhiteSpace(newFarmName) ? currentFarmName : newFarmName.Trim();
-                var saveFolder = HeadlessWorldGenerator.ArchiveAndResetWorld(
-                    config,
-                    targetFarmName,
-                    newFarmType,
-                    newStartingCabins,
-                    _logger);
+                var saveFolder = await ServerHost.EnqueueMainThreadFuncAsync(() =>
+                {
+                    return HeadlessWorldGenerator.ArchiveAndResetWorld(
+                        config,
+                        targetFarmName,
+                        newFarmType,
+                        newStartingCabins,
+                        _logger);
+                });
 
                 _logger?.Info("AdminWeb", $"Dunia '{currentFarmName}' berhasil diarsipkan dan di-reset ke '{targetFarmName}'.");
 
@@ -1052,13 +1061,17 @@ public static class KestrelWebServer
             if (user == null) return Results.NotFound(new { error = "Pemain tidak ditemukan." });
 
             int walletGold = 0;
-            if (Game1.otherFarmers != null && Game1.otherFarmers.TryGetValue(id, out var farmer))
+            var onlineFarmer = ResolveOnlineFarmer(user, id);
+            if (onlineFarmer != null)
             {
-                walletGold = farmer.Money;
+                walletGold = onlineFarmer.Money;
             }
 
             int forfeitedGold = await _dbService.PurgePlayerAsync(id, reason, walletGold);
-            var cleanResult = WorldCleanupService.CleanWorldForDeletedPlayer(id, _logger);
+            var cleanResult = await ServerHost.EnqueueMainThreadFuncAsync(() =>
+            {
+                return WorldCleanupService.CleanWorldForDeletedPlayer(id, _logger);
+            });
 
             _logger?.Info("AdminWeb", $"Akun pemain '{user.Username}' (ID: {id}) dibersihkan! Sitaan Uang: {forfeitedGold}g ke Kas Desa. Kabin dibebaskan: {cleanResult.CabinsFreed}. Tanaman publik: {cleanResult.CropsReleased}.");
 
@@ -1081,16 +1094,21 @@ public static class KestrelWebServer
                 return Results.BadRequest(new { error = "Nama profesi baru tidak boleh kosong." });
             }
 
+            var user = await _dbService.GetUserByIdAsync(id);
             var result = await _dbService.ChangeProfessionAsync(id, newProf, isAdminOverride: true);
             if (!result.success)
             {
                 return Results.BadRequest(new { error = result.message });
             }
 
-            if (Game1.otherFarmers != null && Game1.otherFarmers.TryGetValue(id, out var farmer))
+            await ServerHost.EnqueueMainThreadActionAsync(() =>
             {
-                farmer.modData["svheadless/profession"] = newProf.ToLowerInvariant();
-            }
+                var onlineFarmer = ResolveOnlineFarmer(user, id);
+                if (onlineFarmer != null)
+                {
+                    onlineFarmer.modData["svheadless/profession"] = newProf.ToLowerInvariant();
+                }
+            });
 
             _logger?.Info("AdminWeb", $"Profesi pemain ID: {id} diubah menjadi '{newProf}' oleh Admin Override.");
             return Results.Ok(new { success = true, message = result.message });
@@ -1109,10 +1127,15 @@ public static class KestrelWebServer
 
             await _dbService.BanUserAsync(id, reason, banIp, banHwid, "SysAdmin");
 
-            if (Game1.server != null && Game1.otherFarmers != null && Game1.otherFarmers.ContainsKey(id))
+            await ServerHost.EnqueueMainThreadActionAsync(() =>
             {
-                Game1.server.kick(id);
-            }
+                var onlineFarmer = ResolveOnlineFarmer(user, id);
+                long kickTargetId = onlineFarmer?.UniqueMultiplayerID ?? (user.LinkedFarmerId ?? 0);
+                if (kickTargetId != 0 && Game1.server != null && Game1.otherFarmers != null && Game1.otherFarmers.ContainsKey(kickTargetId))
+                {
+                    Game1.server.kick(kickTargetId);
+                }
+            });
 
             _logger?.Info("AdminWeb", $"Pemain '{user.Username}' (ID: {id}) dijatuhi sanksi BANNED. (IP: {banIp}, HWID: {banHwid}, Alasan: {reason})");
             return Results.Ok(new { success = true, message = $"Pemain '{user.Username}' berhasil di-banned." });
@@ -1441,9 +1464,10 @@ public static class KestrelWebServer
             }
 
             int walletGold = 0;
-            if (Game1.otherFarmers != null && Game1.otherFarmers.TryGetValue(user.Id, out var farmer))
+            var onlineFarmer = ResolveOnlineFarmer(user);
+            if (onlineFarmer != null)
             {
-                walletGold = farmer.Money;
+                walletGold = onlineFarmer.Money;
             }
 
             var result = await _dbService.ChangeProfessionAsync(user.Id, newProf, isAdminOverride: false, walletGold);
@@ -1452,11 +1476,15 @@ public static class KestrelWebServer
                 return Results.BadRequest(new { error = result.message });
             }
 
-            if (Game1.otherFarmers != null && Game1.otherFarmers.TryGetValue(user.Id, out var f))
+            await ServerHost.EnqueueMainThreadActionAsync(() =>
             {
-                f.Money = Math.Max(0, f.Money - result.feeDeducted);
-                f.modData["svheadless/profession"] = newProf.ToLowerInvariant();
-            }
+                var f = ResolveOnlineFarmer(user);
+                if (f != null)
+                {
+                    f.Money = Math.Max(0, f.Money - result.feeDeducted);
+                    f.modData["svheadless/profession"] = newProf.ToLowerInvariant();
+                }
+            });
 
             return Results.Ok(new
             {

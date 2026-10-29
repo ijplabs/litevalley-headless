@@ -148,7 +148,9 @@ public static class AntiCheatCoordinator
 
                 if (actionTaken.StartsWith("AutoBan"))
                 {
-                    await _dbService.BanUserAsync(farmerId, $"Anti-Cheat Violation: {incidentType} ({details})", banIp: true, banHwid: !string.IsNullOrWhiteSpace(hwid), bannedBy: "ServerAntiCheatWatchdog");
+                    var user = await _dbService.GetUserByLinkedFarmerAsync(farmerId, username);
+                    long targetUserId = user?.Id ?? farmerId;
+                    await _dbService.BanUserAsync(targetUserId, $"Anti-Cheat Violation: {incidentType} ({details})", banIp: true, banHwid: !string.IsNullOrWhiteSpace(hwid), bannedBy: "ServerAntiCheatWatchdog");
                     if (!string.IsNullOrWhiteSpace(hwid))
                     {
                         await _dbService.BanHwidAsync(hwid, username, $"Anti-Cheat Violation: {incidentType} ({details})");

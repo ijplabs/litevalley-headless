@@ -1,5 +1,7 @@
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.IO;
+using System.Threading.Tasks;
 using HarmonyLib;
 using Microsoft.Xna.Framework;
 using StardewHeadless.Protocol.Logging;
@@ -29,12 +31,99 @@ public static class ServerHost
     private static string _logsDir = string.Empty;
     private static readonly CancellationTokenSource _cts = new();
     private static readonly Action? _threadingRun = AccessTools.Method("Microsoft.Xna.Framework.Threading:Run")?.CreateDelegate<Action>();
+    private static readonly ConcurrentQueue<Action> _mainThreadQueue = new();
+
+    public static bool IsLoopRunning { get; internal set; } = false;
 
     public static IRedisService? Redis => _redisService;
     public static Database.IDatabaseService? Database => _databaseService;
     public static Mods.ModManagerService? ModManager => _modManager;
     public static ServerConfig Config => _config;
     public static string LogsDir => _logsDir;
+
+    /// <summary>
+    /// Menempatkan aksi ke dalam antrean main thread game simulation (60 Hz loop) untuk mencegah race condition lintas-thread.
+    /// </summary>
+    public static void EnqueueMainThreadAction(Action action)
+    {
+        if (action == null) return;
+        if (!IsLoopRunning)
+        {
+            try { action(); }
+            catch (Exception ex) { _logger?.Error("MainThreadDispatcher", "Exception saat fallback sync action", null, ex); }
+            return;
+        }
+        _mainThreadQueue.Enqueue(action);
+    }
+
+    /// <summary>
+    /// Menjalankan aksi di main thread secara asinkron dan menunggu hingga selesai dieksekusi oleh game loop.
+    /// </summary>
+    public static Task EnqueueMainThreadActionAsync(Action action)
+    {
+        if (action == null) return Task.CompletedTask;
+        if (!IsLoopRunning)
+        {
+            try
+            {
+                action();
+                return Task.CompletedTask;
+            }
+            catch (Exception ex)
+            {
+                return Task.FromException(ex);
+            }
+        }
+
+        var tcs = new TaskCompletionSource<bool>();
+        _mainThreadQueue.Enqueue(() =>
+        {
+            try
+            {
+                action();
+                tcs.TrySetResult(true);
+            }
+            catch (Exception ex)
+            {
+                tcs.TrySetException(ex);
+            }
+        });
+        return tcs.Task;
+    }
+
+    /// <summary>
+    /// Menjalankan fungsi di main thread secara asinkron dan mengembalikan nilai hasilnya.
+    /// </summary>
+    public static Task<T> EnqueueMainThreadFuncAsync<T>(Func<T> func)
+    {
+        if (func == null) throw new ArgumentNullException(nameof(func));
+        if (!IsLoopRunning)
+        {
+            try
+            {
+                return Task.FromResult(func());
+            }
+            catch (Exception ex)
+            {
+                return Task.FromException<T>(ex);
+            }
+        }
+
+        var tcs = new TaskCompletionSource<T>();
+        _mainThreadQueue.Enqueue(() =>
+        {
+            try
+            {
+                var res = func();
+                tcs.TrySetResult(res);
+            }
+            catch (Exception ex)
+            {
+                tcs.TrySetException(ex);
+            }
+        });
+        return tcs.Task;
+    }
 
     public static int Run(StructuredLogger logger, ServerConfig config, string[] args)
     {
@@ -234,8 +323,9 @@ public static class ServerHost
             Game1.options.enableServer = true;
             Game1.options.ipConnectionsEnabled = true;
             Game1.options.serverPrivacy = ServerPrivacy.Public;
+            int targetCabins = Math.Clamp(_config?.StartingCabins ?? 8, 1, 16);
             Game1.options.enableFarmhandCreation = true;
-            Game1.Multiplayer.playerLimit = 8;
+            Game1.Multiplayer.playerLimit = targetCabins;
 
             if (Game1.player?.team != null)
             {
@@ -251,7 +341,7 @@ public static class ServerHost
             {
                 LobbyCabinManager.EnsureLobbyCabin(currentFarm);
             }
-            EnsureMultiplayerCabins(8);
+            EnsureMultiplayerCabins(targetCabins);
             WorldSimulationService.UpdateWorldObjects(Game1.getFarm());
 
             if (Game1.server == null)
@@ -272,77 +362,104 @@ public static class ServerHost
         long windowTicks = 0;
 
         _logger?.Info("ServerLoop", "Headless Game Loop aktif pada 60 Hz.");
+        IsLoopRunning = true;
 
-        while (!_cts.IsCancellationRequested && (_targetTicks == 0 || totalTicks < _targetTicks))
+        try
         {
-            var nextTickTarget = lastTickTime + targetInterval;
-
-            try
+            while (!_cts.IsCancellationRequested && (_targetTicks == 0 || totalTicks < _targetTicks))
             {
-                if (Game1.gameMode != 3)
+                var nextTickTarget = lastTickTime + targetInterval;
+
+                // 1. Eksekusi antrean MainThreadDispatcher (maksimal 5ms per tick untuk melindungi 60 TPS)
+                var dispatcherSw = Stopwatch.StartNew();
+                while (_mainThreadQueue.TryDequeue(out var mainAction))
                 {
-                    Game1.setGameMode(3);
+                    try
+                    {
+                        mainAction();
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger?.Error("MainThreadDispatcher", "Exception saat menjalankan action di main loop", null, ex);
+                    }
+
+                    if (dispatcherSw.ElapsedMilliseconds >= 5)
+                    {
+                        break;
+                    }
                 }
 
-                if (Game1.currentLocation == null && Game1.locations != null && Game1.locations.Count > 0)
+                try
                 {
-                    Game1.currentLocation = Game1.getLocationFromName("FarmHouse") ?? Game1.getFarm();
+                    if (Game1.gameMode != 3)
+                    {
+                        Game1.setGameMode(3);
+                    }
+
+                    if (Game1.currentLocation == null && Game1.locations != null && Game1.locations.Count > 0)
+                    {
+                        Game1.currentLocation = Game1.getLocationFromName("FarmHouse") ?? Game1.getFarm();
+                    }
+
+                    if (Game1.player != null && Game1.player.currentLocation == null)
+                    {
+                        Game1.player.currentLocation = Game1.currentLocation;
+                    }
+
+                    GameRunner.instance.Tick();
+                    _threadingRun?.Invoke();
+
+                    if (Game1.server != null)
+                    {
+                        Game1.server.receiveMessages();
+                    }
+
+                    if (Game1.Multiplayer != null)
+                    {
+                        Game1.Multiplayer.UpdateLate();
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger?.Error("ServerLoop", "Exception di dalam GameRunner.Tick()", null, ex);
                 }
 
-                if (Game1.player != null && Game1.player.currentLocation == null)
+                totalTicks++;
+                windowTicks++;
+                lastTickTime = stopwatch.Elapsed;
+
+                // Setiap 60 ticks (~1 detik), hitung TPS & tulis snapshot telemetri
+                if ((stopwatch.Elapsed - lastSnapshotTime).TotalSeconds >= 1.0)
                 {
-                    Game1.player.currentLocation = Game1.currentLocation;
+                    var elapsedSec = (stopwatch.Elapsed - lastSnapshotTime).TotalSeconds;
+                    var currentTps = windowTicks / elapsedSec;
+                    PublishLiveSnapshot(totalTicks, currentTps, stopwatch.Elapsed.TotalSeconds);
+
+                    // Update otomatis status jeda waktu server berdasarkan pemain aktif & terautentikasi (Milestone 4.4)
+                    int onlinePlayerCount = Game1.server?.connectionsCount ?? 0;
+                    if (onlinePlayerCount == 0) Security.LobbyGatekeeper.ClearAll();
+                    int authPlayerCount = onlinePlayerCount == 0 ? 0 : Security.LobbyGatekeeper.GetAuthenticatedPlayerCount();
+                    DayTransitionManager.UpdateServerTimeProgression(onlinePlayerCount, authPlayerCount, Game1.netWorldState?.Value);
+
+                    windowTicks = 0;
+                    lastSnapshotTime = stopwatch.Elapsed;
                 }
 
-                GameRunner.instance.Tick();
-                _threadingRun?.Invoke();
-
-                if (Game1.server != null)
+                // Presisi timing tanpa spinning 100% CPU
+                var sleepTime = nextTickTarget - stopwatch.Elapsed;
+                if (sleepTime.TotalMilliseconds >= 1.0)
                 {
-                    Game1.server.receiveMessages();
+                    Thread.Sleep((int)sleepTime.TotalMilliseconds);
                 }
-
-                if (Game1.Multiplayer != null)
+                else if (sleepTime > TimeSpan.Zero)
                 {
-                    Game1.Multiplayer.UpdateLate();
+                    Thread.Yield();
                 }
             }
-            catch (Exception ex)
-            {
-                _logger?.Error("ServerLoop", "Exception di dalam GameRunner.Tick()", null, ex);
-            }
-
-            totalTicks++;
-            windowTicks++;
-            lastTickTime = stopwatch.Elapsed;
-
-            // Setiap 60 ticks (~1 detik), hitung TPS & tulis snapshot telemetri
-            if ((stopwatch.Elapsed - lastSnapshotTime).TotalSeconds >= 1.0)
-            {
-                var elapsedSec = (stopwatch.Elapsed - lastSnapshotTime).TotalSeconds;
-                var currentTps = windowTicks / elapsedSec;
-                PublishLiveSnapshot(totalTicks, currentTps, stopwatch.Elapsed.TotalSeconds);
-
-                // Update otomatis status jeda waktu server berdasarkan pemain aktif & terautentikasi (Milestone 4.4)
-                int onlinePlayerCount = Game1.server?.connectionsCount ?? 0;
-                if (onlinePlayerCount == 0) Security.LobbyGatekeeper.ClearAll();
-                int authPlayerCount = onlinePlayerCount == 0 ? 0 : Security.LobbyGatekeeper.GetAuthenticatedPlayerCount();
-                DayTransitionManager.UpdateServerTimeProgression(onlinePlayerCount, authPlayerCount, Game1.netWorldState?.Value);
-
-                windowTicks = 0;
-                lastSnapshotTime = stopwatch.Elapsed;
-            }
-
-            // Presisi timing tanpa spinning 100% CPU
-            var sleepTime = nextTickTarget - stopwatch.Elapsed;
-            if (sleepTime.TotalMilliseconds >= 1.0)
-            {
-                Thread.Sleep((int)sleepTime.TotalMilliseconds);
-            }
-            else if (sleepTime > TimeSpan.Zero)
-            {
-                Thread.Yield();
-            }
+        }
+        finally
+        {
+            IsLoopRunning = false;
         }
 
         _logger?.Info("ServerLoop", $"Tick loop selesai. Total ticks dijalankan: {totalTicks}.");
@@ -420,12 +537,13 @@ public static class ServerHost
         }
     }
 
-    public static void EnsureMultiplayerCabins(int minCabins = 8)
+    public static void EnsureMultiplayerCabins(int? minCabins = null)
     {
         var farm = Game1.getFarm();
         if (farm != null)
         {
-            EnsureMultiplayerCabins(farm, minCabins);
+            int count = minCabins ?? Math.Clamp(_config?.StartingCabins ?? 8, 1, 16);
+            EnsureMultiplayerCabins(farm, count);
         }
     }
 

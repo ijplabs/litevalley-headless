@@ -260,9 +260,9 @@ public static class WorldEntityScanner
 
                 if (obj is Chest chest)
                 {
-                    state["isCommunal"] = chest.modData != null && chest.modData.ContainsKey("svheadless/is_communal");
+                    state["isCommunal"] = chest.modData != null && (chest.modData.ContainsKey("svheadless/is_communal") || chest.modData.ContainsKey("svheadless/community_storage"));
                     state["itemCount"] = chest.Items?.Count(i => i != null) ?? 0;
-                    state["ownerId"] = chest.modData != null && chest.modData.TryGetValue("svheadless/owner_id", out var oid) ? oid : null;
+                    state["ownerId"] = chest.modData != null && (chest.modData.TryGetValue("svheadless/owner_id", out var oid) || chest.modData.TryGetValue("svheadless/chest_owner", out oid) || chest.modData.TryGetValue("svheadless/private_owner", out oid)) ? oid : null;
                 }
                 else if (obj.bigCraftable?.Value == true)
                 {

@@ -74,6 +74,7 @@ public static class ChestLockManager
             // Buat peti kayu vanilla Stardew Valley asli (ItemId "130", Qualified "(BC)130")
             var chest = new Chest(playerChest: true, tileLocation: tile, itemId: "130");
             chest.modData["svheadless/community_storage"] = "true";
+            chest.modData["svheadless/is_communal"] = "true";
             chest.modData["svheadless/chest_label"] = label;
             chest.playerChoiceColor.Value = Color.White; // Tampilan standar kayu stardew tanpa glitch
             
@@ -91,6 +92,7 @@ public static class ChestLockManager
             }
             chest.playerChest.Value = true;
             chest.modData["svheadless/community_storage"] = "true";
+            chest.modData["svheadless/is_communal"] = "true";
             chest.modData["svheadless/chest_label"] = label;
             chest.playerChoiceColor.Value = Color.White;
         }
@@ -140,7 +142,7 @@ public static class ChestLockManager
         if (player == null || chest == null) return false;
 
         // 1. Peti komunal desa selalu dapat diakses oleh semua warga
-        if (chest.modData.ContainsKey("svheadless/community_storage"))
+        if (chest.modData.ContainsKey("svheadless/community_storage") || chest.modData.ContainsKey("svheadless/is_communal"))
         {
             return true;
         }
@@ -175,7 +177,7 @@ public static class ChestLockManager
         }
 
         // 2b. Cek modData kepemilikan peti langsung
-        if (chest.modData.TryGetValue("svheadless/chest_owner", out var ownerStr) && long.TryParse(ownerStr, out long lockedOwnerId))
+        if ((chest.modData.TryGetValue("svheadless/chest_owner", out var ownerStr) || chest.modData.TryGetValue("svheadless/owner_id", out ownerStr) || chest.modData.TryGetValue("svheadless/private_owner", out ownerStr) || chest.modData.TryGetValue("svheadless/locked_by", out ownerStr)) && long.TryParse(ownerStr, out long lockedOwnerId))
         {
             if (lockedOwnerId != 0 && lockedOwnerId != player.UniqueMultiplayerID)
             {

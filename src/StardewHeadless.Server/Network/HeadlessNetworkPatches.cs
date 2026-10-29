@@ -109,9 +109,10 @@ public static class HeadlessNetworkPatches
         }
     }
 
-    public static void CheckFarmhandRequest_Prefix(NetFarmerRoot farmer)
+        public static void CheckFarmhandRequest_Prefix(NetFarmerRoot farmer)
     {
         if (farmer?.Value == null) return;
+        ServerInventoryCapacitySync.EnsureCapacity(farmer.Value);
         long farmerId = farmer.Value.UniqueMultiplayerID;
         string clientName = string.IsNullOrWhiteSpace(farmer.Value.Name) ? "Farmer" : farmer.Value.Name;
 
@@ -170,6 +171,7 @@ public static class HeadlessNetworkPatches
             var f = farmhandRef.Value;
             if (f != null)
             {
+                ServerInventoryCapacitySync.EnsureCapacity(f);
                 // Jangan override lokasi farmhand lama yang sudah dibuat / memiliki nama terdaftar
                 bool isNewOrUnclaimed = !f.isCustomized.Value || string.IsNullOrWhiteSpace(f.Name);
                 if (isNewOrUnclaimed && !LobbyGatekeeper.IsClientAuthenticated(f.UniqueMultiplayerID))

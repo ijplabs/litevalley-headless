@@ -32,7 +32,7 @@ public static class AutomateCompatibilityBridge
         if (chest == null) return false;
 
         // 1. Peti komunal desa selalu dapat diotomasi untuk kemakmuran bersama
-        if (chest.modData.ContainsKey("svheadless/community_storage"))
+        if (chest.modData.ContainsKey("svheadless/community_storage") || chest.modData.ContainsKey("svheadless/is_communal"))
         {
             return true;
         }
@@ -44,7 +44,7 @@ public static class AutomateCompatibilityBridge
         }
 
         // 3. Peti privat milik pemain
-        if (chest.modData.TryGetValue("svheadless/private_owner", out var ownerStr))
+        if (chest.modData.TryGetValue("svheadless/private_owner", out var ownerStr) || chest.modData.TryGetValue("svheadless/chest_owner", out ownerStr) || chest.modData.TryGetValue("svheadless/owner_id", out ownerStr))
         {
             if (long.TryParse(ownerStr, out var ownerId))
             {
