@@ -199,7 +199,92 @@ public static class DayTransitionManager
 
     #endregion
 
-    #region Harmony Patch Interceptors
+    public static async Task ProcessAllShippingTaxesAndBroadcastAsync(StardewValley.Network.IGameServer? server)
+    {
+        if (_databaseService == null) return;
+
+        int totalTaxCollected = 0;
+        string lastFarmer = string.Empty;
+
+        var allFarmers = new List<Farmer>();
+        if (Game1.otherFarmers != null)
+        {
+            allFarmers.AddRange(Game1.otherFarmers.Values);
+        }
+
+        foreach (var farmer in allFarmers)
+        {
+            var shippedItems = new List<Item>();
+            try
+            {
+                if (farmer.personalShippingBin?.Value != null && farmer.personalShippingBin.Value.Count > 0)
+                {
+                    shippedItems.AddRange(farmer.personalShippingBin.Value);
+                }
+                var farm = Game1.getFarm();
+                if (farm != null)
+                {
+                    var bin = farm.getShippingBin(farmer);
+                    if (bin != null && bin.Count > 0)
+                    {
+                        foreach (var item in bin)
+                        {
+                            if (!shippedItems.Contains(item)) shippedItems.Add(item);
+                        }
+                    }
+                }
+            }
+            catch
+            {
+            }
+
+            if (shippedItems.Count > 0)
+            {
+                var (gross, tax, net) = await ProcessShippingTaxAsync(farmer, shippedItems, _databaseService, _logger);
+                if (tax > 0)
+                {
+                    totalTaxCollected += tax;
+                    lastFarmer = farmer.Name;
+                }
+            }
+        }
+
+        if (totalTaxCollected > 0 && server != null && Game1.otherFarmers != null)
+        {
+            int newTreasuryBalance = await _databaseService.GetTreasuryBalanceAsync();
+            var update = new StardewHeadless.Protocol.Packets.VillageTreasuryUpdatePacket
+            {
+                NewBalance = newTreasuryBalance,
+                LastContributorName = lastFarmer,
+                LastContributionAmount = totalTaxCollected
+            };
+            byte[] payload = update.Serialize();
+            foreach (long peerId in Game1.otherFarmers.Keys)
+            {
+                server.sendMessage(peerId, new StardewValley.Network.OutgoingMessage(33, Game1.player.UniqueMultiplayerID, (object)payload));
+            }
+        }
+
+        // Sinkronisasi SkillLevel seluruh petani yang terhubung dan bagikan buff perk 0xA0
+        await StardewHeadless.Server.Professions.ProfessionLevelSyncService.SyncAllConnectedFarmersAsync(server, _databaseService);
+    }
+
+    public static void NewDay_Postfix()
+    {
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await ProcessAllShippingTaxesAndBroadcastAsync(Game1.server);
+            }
+            catch (Exception ex)
+            {
+                _logger?.Error("DayTransition", "Gagal memproses pajak ekspor NewDay", null, ex);
+            }
+        });
+    }
+
+        #region Harmony Patch Interceptors
 
     /// <summary>
     /// Prefix patch untuk DedicatedServer.CheckOthersReady guna mendukung Sleep Quorum.

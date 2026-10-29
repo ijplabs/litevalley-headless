@@ -22,6 +22,7 @@ public static class ServerHost
     private static ServerConfig _config = new();
     private static IRedisService? _redisService;
     private static Database.IDatabaseService? _databaseService;
+    private static Mods.ModManagerService? _modManager;
     private static string _saveName = string.Empty;
     private static long _targetTicks;
     private static int _targetPort = 24642;
@@ -31,6 +32,7 @@ public static class ServerHost
 
     public static IRedisService? Redis => _redisService;
     public static Database.IDatabaseService? Database => _databaseService;
+    public static Mods.ModManagerService? ModManager => _modManager;
     public static ServerConfig Config => _config;
     public static string LogsDir => _logsDir;
 
@@ -54,6 +56,9 @@ public static class ServerHost
             var dbPath = Path.Combine(config.ConfigDir, "stardew_server.db");
             _databaseService = new Database.DatabaseService(dbPath);
             _databaseService.InitializeAsync().GetAwaiter().GetResult();
+            
+            // Seed initial 1500g village treasury grant if freshly initialized
+            _databaseService.EnsureInitialTreasuryGrantAsync(1500).GetAwaiter().GetResult();
             _logger.Info("Database", $"Database SQLite aktif di '{dbPath}' (WAL Mode)");
         }
         catch (Exception ex)
@@ -65,6 +70,12 @@ public static class ServerHost
         _redisService = new RedisService(config.RedisHost, config.RedisPort, config.RedisPassword);
 
         ParseCommandLine(args);
+
+        // 3. Inisialisasi Mod Manager Service
+        string modsDir = !string.IsNullOrWhiteSpace(config.ModsPath)
+            ? config.ModsPath
+            : Path.Combine(config.ConfigDir, "mods");
+        _modManager = new Mods.ModManagerService(modsDir, _databaseService, _logger);
 
         // Setup Network & Bridge Protocol Router
         BridgeProtocolRouter.Initialize(_logger);
@@ -451,10 +462,6 @@ public static class ServerHost
     {
         if (farm == null) return;
 
-        bool isIF2R = farm.NameOrUniqueName?.Contains("IF2R", StringComparison.OrdinalIgnoreCase) == true
-                      || farm.map?.Properties?.ContainsKey("FarmCaveEntry") == true;
-        if (isIF2R) return;
-
         // 1. Amankan Farmhouse host agar tidak memicu tabrakan/collision tak kasat mata
         var farmhouse = farm.buildings.FirstOrDefault(b => b.buildingType.Value == "Farmhouse");
         if (farmhouse != null && (farmhouse.tileX.Value >= 0 || farmhouse.tileY.Value >= 0))
@@ -468,10 +475,11 @@ public static class ServerHost
                                            .OrderBy(b => b.tileX.Value)
                                            .ToList();
 
-        const int mainHouseX = 58;
-        const int mainHouseY = 14;
-        const int mainDoorX = 60;
-        const int mainEntranceY = 17;
+        var layout = MapLayoutResolver.Resolve(farm, _config?.FarmProfileId);
+        int mainHouseX = layout.MainHouseTopLeft.X;
+        int mainHouseY = layout.MainHouseTopLeft.Y;
+        int mainDoorX = layout.FrontDoor.X;
+        int mainEntranceY = layout.FrontEntranceStep.Y;
 
         // 3. Pastikan Kabin #1 adalah Rumah Fisik Utama di Farm (58, 14)
         if (nonLobbyCabins.Count > 0)
@@ -644,28 +652,12 @@ public static class ServerHost
                 Quorum = new QuorumStateSnapshot
                 {
                     SleepReadyCount = Game1.player?.team?.announcedSleepingFarmers.Count ?? 0,
-                    SleepTotalCount = Game1.otherFarmers.Count + 1,
+                    SleepTotalCount = Game1.otherFarmers.Count,
                     AllReady = false
                 }
             };
 
-            // Tambahkan data pemain online
-            if (Game1.player != null)
-            {
-                snapshot.Players.Add(new PlayerStateSnapshot
-                {
-                    FarmerId = Game1.player.UniqueMultiplayerID,
-                    Name = Game1.player.Name,
-                    Location = Game1.currentLocation?.NameOrUniqueName ?? "None",
-                    TilePosition = new TileVector
-                    {
-                        X = Game1.player.TilePoint.X,
-                        Y = Game1.player.TilePoint.Y
-                    },
-                    IsSleeping = Game1.player.isInBed?.Value ?? false
-                });
-            }
-
+            // Tambahkan data pemain online (hanya pemain sungguhan, exclude host dummy "Server")
             foreach (var other in Game1.otherFarmers.Values)
             {
                 snapshot.Players.Add(new PlayerStateSnapshot

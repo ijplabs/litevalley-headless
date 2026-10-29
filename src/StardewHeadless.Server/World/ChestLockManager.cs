@@ -48,32 +48,9 @@ public static class ChestLockManager
         Vector2 tileChest1;
         Vector2 tileChest2;
 
-        if (isIF2R)
-        {
-            tileChest1 = new Vector2(67, 18);
-            tileChest2 = new Vector2(68, 18);
-        }
-        else
-        {
-            // Diletakkan tepat di sebelah kanan pintu masuk Rumah Fisik Utama di Farm
-            var mainHouse = farm.buildings.FirstOrDefault(b => b.isCabin && b.modData.ContainsKey("svheadless/main_estate_house"))
-                            ?? farm.buildings.FirstOrDefault(b => b.isCabin && !LobbyCabinManager.IsLobbyCabin(b) && b.tileX.Value > 0);
-
-            if (mainHouse != null)
-            {
-                int midX = mainHouse.tileX.Value;
-                int midY = mainHouse.tileY.Value;
-                // Rumah fisik di (58, 14), pintu di (60, 16), jalan di (60, 17)
-                // Taruh peti berdampingan di (62, 17) dan (63, 17) agar tidak menghalangi langkah keluar-masuk
-                tileChest1 = new Vector2(midX + 4, midY + 3); // (62, 17)
-                tileChest2 = new Vector2(midX + 5, midY + 3); // (63, 17)
-            }
-            else
-            {
-                tileChest1 = new Vector2(62, 17);
-                tileChest2 = new Vector2(63, 17);
-            }
-        }
+        var layout = MapLayoutResolver.Resolve(farm, ServerHost.Config?.FarmProfileId);
+        tileChest1 = new Vector2(layout.CommunalChest1.X, layout.CommunalChest1.Y);
+        tileChest2 = new Vector2(layout.CommunalChest2.X, layout.CommunalChest2.Y);
 
         PlaceOrVerifyCommunityChest(farm, tileChest1, "Peti Komunal Desa #1 (Hasil Bumi & Makanan)");
         PlaceOrVerifyCommunityChest(farm, tileChest2, "Peti Komunal Desa #2 (Mineral, Kayu & Alat)");
@@ -168,12 +145,45 @@ public static class ChestLockManager
             return true;
         }
 
-        // 2. Jika peti berada di dalam Kabin orang lain
-        if (player.currentLocation is Cabin cabin)
+        // 2. Jika peti berada di dalam Kabin orang lain (periksa lokasi peti dan lokasi pemain)
+        GameLocation? chestLoc = chest.Location;
+        if (chestLoc is Cabin targetCabin)
         {
-            if (cabin.owner != null && cabin.owner.UniqueMultiplayerID != player.UniqueMultiplayerID)
+            long cabinOwnerId = targetCabin.farmhandReference?.UID ?? 0;
+            if (cabinOwnerId == 0)
             {
-                // Peti di dalam kabin milik orang lain terkunci secara privat
+                try { cabinOwnerId = targetCabin.owner?.UniqueMultiplayerID ?? 0; } catch { }
+            }
+
+            if (cabinOwnerId != 0 && cabinOwnerId != player.UniqueMultiplayerID)
+            {
+                return false;
+            }
+        }
+        else if (player.currentLocation is Cabin playerCabin)
+        {
+            long playerCabinOwnerId = playerCabin.farmhandReference?.UID ?? 0;
+            if (playerCabinOwnerId == 0)
+            {
+                try { playerCabinOwnerId = playerCabin.owner?.UniqueMultiplayerID ?? 0; } catch { }
+            }
+
+            if (playerCabinOwnerId != 0 && playerCabinOwnerId != player.UniqueMultiplayerID)
+            {
+                return false;
+            }
+        }
+
+        // 2b. Cek modData kepemilikan peti langsung
+        if (chest.modData.TryGetValue("svheadless/chest_owner", out var ownerStr) && long.TryParse(ownerStr, out long lockedOwnerId))
+        {
+            if (lockedOwnerId != 0 && lockedOwnerId != player.UniqueMultiplayerID)
+            {
+                string cId = GetChestId(chest);
+                if (_sharedChestAccess.TryGetValue(cId, out var allowed) && allowed.Contains(player.UniqueMultiplayerID))
+                {
+                    return true;
+                }
                 return false;
             }
         }

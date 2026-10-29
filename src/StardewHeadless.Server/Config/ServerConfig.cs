@@ -20,6 +20,74 @@ public class ServerConfig
     public string? RedisHost { get; set; }
     public int RedisPort { get; set; } = 6379;
     public string? RedisPassword { get; set; }
+    public string? AdminPin { get; set; }
+
+    /// <summary>
+    /// Menentukan kebijakan penegakan mod klien:
+    /// false (Default / Strict Whitelist): Hanya mod resmi terdaftar yang diizinkan masuk ke server; mod tak dikenal ditolak.
+    /// true (Permissive / Allow All Mods): Mod tak dikenal diizinkan masuk, namun diberi peringatan risiko bug/glitch.
+    /// Mod cheat terlarang (Blacklist) akan SELALU ditolak di kedua mode.
+    /// </summary>
+    public bool AllowAllMods { get; set; } = false;
+
+    /// <summary>
+    /// Slug profil peternakan terstandarisasi (misal: "vanilla:standard", "vanilla:meadowlands", "sve:if2r", "sve:grandpas_farm", "sve:frontier_farm").
+    /// </summary>
+    public string FarmProfileId { get; set; } = "vanilla:standard";
+
+    /// <summary>
+    /// Path direktori mod terisolasi untuk instance server saat ini (digunakan oleh Headless SMAPI).
+    /// </summary>
+    public string? ModsPath { get; set; }
+
+    /// <summary>
+    /// Menentukan apakah SMAPI di-boot untuk server ini.
+    /// </summary>
+    public bool EnableSmapi { get; set; } = false;
+
+    /// <summary>
+    /// Menghitung tipe farm numerik (0..7) yang sesuai dengan FarmProfileId atau FarmType.
+    /// </summary>
+    public int ResolvedFarmType
+    {
+        get
+        {
+            if (!string.IsNullOrWhiteSpace(FarmProfileId))
+            {
+                var lower = FarmProfileId.ToLowerInvariant().Trim();
+                if (lower == "vanilla:standard" || lower == "standard") return 0;
+                if (lower == "vanilla:riverland" || lower == "riverland") return 1;
+                if (lower == "vanilla:forest" || lower == "forest") return 2;
+                if (lower == "vanilla:hilltop" || lower == "hilltop") return 3;
+                if (lower == "vanilla:wilderness" || lower == "wilderness") return 4;
+                if (lower == "vanilla:fourcorners" || lower == "fourcorners") return 5;
+                if (lower == "vanilla:beach" || lower == "beach") return 6;
+                if (lower == "vanilla:meadowlands" || lower == "meadowlands") return 7;
+                if (lower == "sve:if2r" || lower == "if2r") return 0; // IF2R overrides Standard (0)
+                if (lower == "sve:grandpas_farm" || lower == "grandpas_farm") return 0; // Grandpa's Farm overrides Standard (0)
+                if (lower == "sve:frontier_farm" || lower == "frontier_farm") return 7; // Frontier Farm uses 1.6 AdditionalFarms (7)
+                if (lower == "sve:grampleton" || lower == "grampleton") return 0; // Grampleton Fields companion map (0)
+            }
+            return FarmType;
+        }
+    }
+
+    /// <summary>
+    /// Menghitung Id ModFarmType untuk farm tipe 7 (Meadowlands atau Frontier Farm).
+    /// </summary>
+    public string? ResolvedModFarmId
+    {
+        get
+        {
+            var lower = (FarmProfileId ?? string.Empty).ToLowerInvariant().Trim();
+            if (lower == "sve:frontier_farm" || lower == "frontier_farm") return "FrontierFarm";
+            if (lower == "vanilla:meadowlands" || lower == "meadowlands") return "MeadowlandsFarm";
+            if (ResolvedFarmType == 7) return "MeadowlandsFarm";
+            return null;
+        }
+    }
+
+    public bool IsSveProfile => !string.IsNullOrWhiteSpace(FarmProfileId) && FarmProfileId.StartsWith("sve:", StringComparison.OrdinalIgnoreCase);
 
     public static ServerConfig Load(string[] args)
     {
@@ -50,6 +118,18 @@ public class ServerConfig
         if (int.TryParse(Environment.GetEnvironmentVariable("REDIS_PORT"), out int envRedisPort))
             config.RedisPort = envRedisPort;
         config.RedisPassword = Environment.GetEnvironmentVariable("REDIS_PASSWORD");
+        config.AdminPin = Environment.GetEnvironmentVariable("ADMIN_PASSWORD") ?? Environment.GetEnvironmentVariable("ADMIN_PIN");
+
+        if (bool.TryParse(Environment.GetEnvironmentVariable("ALLOW_ALL_MODS"), out bool envAllowAllMods))
+            config.AllowAllMods = envAllowAllMods;
+
+        var envProfile = Environment.GetEnvironmentVariable("FARM_PROFILE") ?? Environment.GetEnvironmentVariable("FARM_PROFILE_ID");
+        if (!string.IsNullOrWhiteSpace(envProfile))
+            config.FarmProfileId = envProfile.Trim();
+
+        config.ModsPath = Environment.GetEnvironmentVariable("MODS_PATH");
+        if (bool.TryParse(Environment.GetEnvironmentVariable("ENABLE_SMAPI"), out bool envSmapi))
+            config.EnableSmapi = envSmapi;
 
         // 2. Override dari Command-Line Arguments
         for (int i = 0; i < args.Length; i++)
@@ -87,6 +167,18 @@ public class ServerConfig
                 config.AutoCreateFreshWorld = true;
             else if (arg.Equals("--redis-host", StringComparison.OrdinalIgnoreCase) && i + 1 < args.Length)
                 config.RedisHost = args[++i];
+            else if (arg.Equals("--admin-pin", StringComparison.OrdinalIgnoreCase) && i + 1 < args.Length)
+                config.AdminPin = args[++i];
+            else if (arg.Equals("--allow-all-mods", StringComparison.OrdinalIgnoreCase))
+                config.AllowAllMods = true;
+            else if (arg.Equals("--strict-mods", StringComparison.OrdinalIgnoreCase))
+                config.AllowAllMods = false;
+            else if ((arg.Equals("--farm-profile", StringComparison.OrdinalIgnoreCase) || arg.Equals("--profile", StringComparison.OrdinalIgnoreCase)) && i + 1 < args.Length)
+                config.FarmProfileId = args[++i];
+            else if (arg.Equals("--mods-path", StringComparison.OrdinalIgnoreCase) && i + 1 < args.Length)
+                config.ModsPath = args[++i];
+            else if (arg.Equals("--enable-smapi", StringComparison.OrdinalIgnoreCase))
+                config.EnableSmapi = true;
         }
 
         // 3. Defaults jika belum ditentukan

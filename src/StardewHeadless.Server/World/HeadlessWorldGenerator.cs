@@ -11,11 +11,27 @@ public static class HeadlessWorldGenerator
 {
     public static string CreateFreshWorld(ServerConfig config, StructuredLogger? logger = null)
     {
-        logger?.Info("WorldGen", $"Memulai pembuatan dunia multiplayer baru (Fresh World): '{config.FarmName}' (Tipe Farm: {config.FarmType})...");
+        int resolvedFarmType = config.ResolvedFarmType;
+        logger?.Info("WorldGen", $"Memulai pembuatan dunia multiplayer baru (Fresh World): '{config.FarmName}' (Profil: {config.FarmProfileId}, Tipe Farm: {resolvedFarmType})...");
 
         // 1. Konfigurasi Mode Multiplayer & Dompet Terpisah
         Game1.multiplayerMode = 2; // Dedicated Server Mode (Game1.IsServer = true)
-        Game1.whichFarm = config.FarmType;
+        Game1.whichFarm = resolvedFarmType;
+        if (resolvedFarmType == 7)
+        {
+            var modFarmId = config.ResolvedModFarmId ?? "MeadowlandsFarm";
+            var modMapName = modFarmId == "FrontierFarm" ? "FrontierFarm" : "Farm_Meadowlands";
+            Game1.whichModFarm = new StardewValley.GameData.ModFarmType
+            {
+                Id = modFarmId,
+                MapName = modMapName
+            };
+            logger?.Info("WorldGen", $"ModFarmType diaktifkan: Id='{modFarmId}', MapName='{modMapName}'.");
+        }
+        else
+        {
+            Game1.whichModFarm = null;
+        }
 
         // 2. Identitas Host Headless
         if (Game1.player != null)
@@ -114,12 +130,15 @@ public static class HeadlessWorldGenerator
         string? newFarmName = null,
         int? newFarmType = null,
         int? newStartingCabins = null,
-        StructuredLogger? logger = null)
+        StructuredLogger? logger = null,
+        string? newFarmProfileId = null)
     {
         logger?.Info("WorldGen", $"Memulai proses reset & pengarsipan dunia saat ini: '{config.FarmName}'...");
 
         // 1. Arsipkan save folder lama jika ada
-        var saveRoot = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "StardewValley", "Saves");
+        var saveRoot = (!string.IsNullOrWhiteSpace(config.SaveDir) && Directory.Exists(config.SaveDir))
+            ? config.SaveDir
+            : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "StardewValley", "Saves");
         if (Directory.Exists(saveRoot))
         {
             var archiveDir = Path.Combine(saveRoot, "archive");
@@ -152,7 +171,11 @@ public static class HeadlessWorldGenerator
         {
             config.FarmName = newFarmName.Trim();
         }
-        if (newFarmType.HasValue && newFarmType.Value >= 0 && newFarmType.Value <= 6)
+        if (!string.IsNullOrWhiteSpace(newFarmProfileId))
+        {
+            config.FarmProfileId = newFarmProfileId.Trim();
+        }
+        if (newFarmType.HasValue && newFarmType.Value >= 0 && newFarmType.Value <= 7)
         {
             config.FarmType = newFarmType.Value;
         }

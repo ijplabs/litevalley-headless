@@ -73,6 +73,37 @@ public static class WorldSimulationService
                 prefix: new HarmonyMethod(typeof(WorldSimulationService), nameof(Farmer_LearnDefaultRecipes_Prefix))
             );
 
+            // 0e. Patch ItemRegistry.GetErrorItemName & Description (Mencegah ContentLoadException StringsFromCSFiles dalam mode headless)
+            try
+            {
+                var getErrNameStr = AccessTools.Method(typeof(ItemRegistry), nameof(ItemRegistry.GetErrorItemName), new[] { typeof(string) });
+                if (getErrNameStr != null)
+                {
+                    harmony.Patch(getErrNameStr, prefix: new HarmonyMethod(typeof(WorldSimulationService), nameof(ItemRegistry_GetErrorItemName_Prefix)));
+                }
+
+                var getErrNameNoArg = AccessTools.Method(typeof(ItemRegistry), nameof(ItemRegistry.GetErrorItemName), Type.EmptyTypes);
+                if (getErrNameNoArg != null)
+                {
+                    harmony.Patch(getErrNameNoArg, prefix: new HarmonyMethod(typeof(WorldSimulationService), nameof(ItemRegistry_GetErrorItemName_NoArg_Prefix)));
+                }
+            }
+            catch { }
+
+            // 0f. Patch DataLoader.Machines (Mencegah ContentLoadException Data\Machines saat ItemRegistry.Create dalam mode headless)
+            try
+            {
+                var machinesMethod = AccessTools.Method(typeof(DataLoader), nameof(DataLoader.Machines), new[] { typeof(LocalizedContentManager) });
+                if (machinesMethod != null)
+                {
+                    harmony.Patch(
+                        original: machinesMethod,
+                        finalizer: new HarmonyMethod(typeof(WorldSimulationService), nameof(DataLoader_Machines_Finalizer))
+                    );
+                }
+            }
+            catch { }
+
             // 1. Patch Chest Access
             harmony.Patch(
                 original: AccessTools.Method(typeof(Chest), nameof(Chest.checkForAction)),
@@ -103,7 +134,17 @@ public static class WorldSimulationService
                 prefix: new HarmonyMethod(typeof(DayTransitionManager), nameof(DayTransitionManager.CheckOthersReady_Prefix))
             );
 
-            _logger?.Info("WorldSim", "Harmony patches untuk ChestLock, CropProtection, FarmAnimal, dan SleepQuorum berhasil diaplikasikan.");
+            // 6. Patch Game1.newDayAfterFade (Pajak Ekspor Kas Desa & Sinkronisasi Perk Profesi)
+            var newDayMethod = AccessTools.Method(typeof(Game1), "newDayAfterFade");
+            if (newDayMethod != null)
+            {
+                harmony.Patch(
+                    original: newDayMethod,
+                    postfix: new HarmonyMethod(typeof(DayTransitionManager), nameof(DayTransitionManager.NewDay_Postfix))
+                );
+            }
+
+            _logger?.Info("WorldSim", "Harmony patches untuk ChestLock, CropProtection, FarmAnimal, SleepQuorum, dan NewDayTax berhasil diaplikasikan.");
         }
         catch (Exception ex)
         {
@@ -112,6 +153,16 @@ public static class WorldSimulationService
     }
 
     #region Harmony Patch Callbacks
+
+    private static Exception? DataLoader_Machines_Finalizer(Exception? __exception, ref Dictionary<string, StardewValley.GameData.Machines.MachineData>? __result)
+    {
+        if (__exception != null)
+        {
+            __result = new Dictionary<string, StardewValley.GameData.Machines.MachineData>();
+            return null;
+        }
+        return null;
+    }
 
     private static bool PlayerStatusList_AddSpriteDefinition_Prefix()
     {
@@ -155,6 +206,18 @@ public static class WorldSimulationService
             return false;
         }
         return true;
+    }
+
+    private static bool ItemRegistry_GetErrorItemName_Prefix(string itemId, ref string __result)
+    {
+        __result = $"Item {itemId ?? "Unknown"}";
+        return false;
+    }
+
+    private static bool ItemRegistry_GetErrorItemName_NoArg_Prefix(ref string __result)
+    {
+        __result = "Item Unknown";
+        return false;
     }
 
     private static bool Chest_CheckForAction_Prefix(Chest __instance, Farmer who, bool justCheckingForActivity)

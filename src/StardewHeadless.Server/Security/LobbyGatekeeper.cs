@@ -19,6 +19,7 @@ public class ClientAuthState
     public string Username { get; set; } = string.Empty;
     public int AssignedCabinIndex { get; set; }
     public string LockedProfession { get; set; } = string.Empty;
+    public string? SessionToken { get; set; }
     public DateTime ConnectedAt { get; set; } = DateTime.UtcNow;
 }
 
@@ -27,6 +28,37 @@ public static class LobbyGatekeeper
     private static StructuredLogger? _logger;
     private static IDatabaseService? _dbOverride;
     private static readonly ConcurrentDictionary<long, ClientAuthState> _clients = new();
+    private static readonly ConcurrentDictionary<string, (long UserId, long FarmerId, DateTime ExpiresAt)> _activeSessionTokens = new();
+
+    public static bool AllowLegacyAutoAuthWithoutTokenForTesting { get; set; } = false;
+
+    public static string IssueSessionToken(long userId, long farmerId, TimeSpan? lifetime = null)
+    {
+        var token = Convert.ToHexString(System.Security.Cryptography.RandomNumberGenerator.GetBytes(32)).ToLowerInvariant();
+        var expiry = DateTime.UtcNow.Add(lifetime ?? TimeSpan.FromDays(7));
+        _activeSessionTokens[token] = (userId, farmerId, expiry);
+        return token;
+    }
+
+    public static bool ValidateSessionToken(string? token, long userId, long farmerId)
+    {
+        if (string.IsNullOrWhiteSpace(token)) return false;
+        if (_activeSessionTokens.TryGetValue(token, out var entry))
+        {
+            if (DateTime.UtcNow > entry.ExpiresAt)
+            {
+                _activeSessionTokens.TryRemove(token, out _);
+                return false;
+            }
+            return entry.UserId == userId && (entry.FarmerId == farmerId || entry.FarmerId == 0);
+        }
+        return false;
+    }
+
+    public static void ClearSessionTokens()
+    {
+        _activeSessionTokens.Clear();
+    }
 
     public static Func<long?, string?, bool>? OldFarmerExistsOverride { get; set; }
 
@@ -77,18 +109,41 @@ public static class LobbyGatekeeper
     /// Memeriksa apakah karakter/user sudah terdaftar dan terverifikasi di database.
     /// Jika ya, otomatis tandai terautentikasi dan bypass karantina lobi (lobi hanya 1x saat buat karakter baru).
     /// </summary>
-    public static bool TryAutoAuthenticateExistingUser(long farmerId, string clientName, Farmer? farmer)
+    public static bool TryAutoAuthenticateExistingUser(long farmerId, string clientName, Farmer? farmer, string? sessionToken = null)
     {
         var db = Database;
         if (db == null) return false;
 
         try
         {
+            if (string.IsNullOrEmpty(sessionToken) && _clients.TryGetValue(farmerId, out var existingState) && !string.IsNullOrEmpty(existingState.SessionToken))
+            {
+                sessionToken = existingState.SessionToken;
+            }
+
             var user = db.GetUserByLinkedFarmerAsync(farmerId, clientName).GetAwaiter().GetResult()
                        ?? db.GetUserAsync(clientName).GetAwaiter().GetResult();
+
             if (user != null && !user.IsBanned && !user.IsDeleted)
             {
+                bool isValid = false;
+                if (!string.IsNullOrEmpty(sessionToken) && ValidateSessionToken(sessionToken, user.Id, farmerId))
+                {
+                    isValid = true;
+                }
+                else if (AllowLegacyAutoAuthWithoutTokenForTesting)
+                {
+                    isValid = true;
+                }
+
+                if (!isValid)
+                {
+                    _logger?.Warn("LobbyGatekeeper", $"Auto-auth ditolak untuk '{clientName}' (ID: {farmerId}): SessionToken tidak valid atau tidak disediakan.");
+                    return false;
+                }
+
                 var state = OnClientConnected(farmerId, clientName, isAuthenticated: true);
+                state.SessionToken = sessionToken;
                 var prof = db.GetProfessionAsync(user.Id).GetAwaiter().GetResult();
                 var cabin = db.GetCabinByUserAsync(user.Id).GetAwaiter().GetResult();
                 state.LockedProfession = prof?.ProfessionType ?? "farmer";
@@ -364,19 +419,20 @@ public static class LobbyGatekeeper
                 _logger?.Info("StarterKit", $"Starter kit '{requestedProf}' diberikan ke '{username}': {string.Join(", ", delivered)}");
             }
 
+            var newSessionToken = IssueSessionToken(newUser.Id, submit.FarmerId);
             var authState = _clients.GetOrAdd(submit.FarmerId, id => new ClientAuthState { FarmerId = id });
             authState.IsAuthenticated = true;
             authState.Username = username;
             authState.AssignedCabinIndex = assignedCabinIndex;
             authState.LockedProfession = requestedProf;
+            authState.SessionToken = newSessionToken;
 
             LobbyCabinManager.WarpPlayerFromLobby(submit.FarmerId, farmer);
             _logger?.Info("LobbyGatekeeper", $"Registrasi SUKSES! '{username}' resmi menjadi '{requestedProf.ToUpper()}' di Kabin #{assignedCabinIndex}. Pintu world dibuka!");
-
             return new AuthSuccessPacket
             {
                 FarmerId = submit.FarmerId,
-                SessionToken = Guid.NewGuid().ToString("N"),
+                SessionToken = newSessionToken,
                 AssignedCabinIndex = assignedCabinIndex,
                 LockedProfession = requestedProf,
                 WelcomeMessage = $"Farmer '{gameName}' berhasil bergabung ke game dan ditautkan dengan akun '{newUser.Username}'! (Profesi: {requestedProf.ToUpper()})"
@@ -540,19 +596,20 @@ public static class LobbyGatekeeper
 
         await db.UpdateLastLoginAsync(existingUser.Id);
 
+        var sessionToken = IssueSessionToken(existingUser.Id, submit.FarmerId);
         var existingAuthState = _clients.GetOrAdd(submit.FarmerId, id => new ClientAuthState { FarmerId = id });
         existingAuthState.IsAuthenticated = true;
         existingAuthState.Username = username;
         existingAuthState.AssignedCabinIndex = cabinIdx;
         existingAuthState.LockedProfession = lockedProf;
+        existingAuthState.SessionToken = sessionToken;
 
         LobbyCabinManager.WarpPlayerFromLobby(submit.FarmerId, farmer);
         _logger?.Info("LobbyGatekeeper", $"Login SUKSES! Selamat datang kembali '{username}' ({lockedProf.ToUpper()}) di Kabin #{cabinIdx}.");
-
         return new AuthSuccessPacket
         {
             FarmerId = submit.FarmerId,
-            SessionToken = Guid.NewGuid().ToString("N"),
+            SessionToken = sessionToken,
             AssignedCabinIndex = cabinIdx,
             LockedProfession = lockedProf,
             WelcomeMessage = $"Farmer '{gameName}' berhasil bergabung ke game dan ditautkan dengan akun '{existingUser.Username}'! (Profesi: {lockedProf.ToUpper()})"
