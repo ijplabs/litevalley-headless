@@ -36,6 +36,10 @@ RUN dotnet publish src/StardewHeadless.Server/StardewHeadless.Server.csproj -c R
 FROM mcr.microsoft.com/dotnet/aspnet:6.0-jammy AS runtime
 WORKDIR /app
 
+LABEL org.opencontainers.image.source="https://github.com/ijplabs/litevalley-headless"
+LABEL org.opencontainers.image.description="LiteValley Headless Dedicated Server for Stardew Valley (0-GPU Clean-Room Daemon)"
+LABEL org.opencontainers.image.licenses="MIT"
+
 # Instal dependensi dasar sistem untuk MonoGame headless & healthcheck
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
@@ -47,7 +51,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Buat direktori data volume server dan symlink save Stardew Valley ke persistent volume
-RUN mkdir -p /data/game /data/saves /data/config /data/logs \
+RUN mkdir -p /data/game /data/saves /data/config /data/logs /data/mods \
     && mkdir -p /root/.config/StardewValley \
     && ln -sfn /data/saves /root/.config/StardewValley/Saves
 
@@ -61,6 +65,7 @@ ENV SDL_VIDEODRIVER=dummy \
     STARDEW_SAVE_DIR=/data/saves \
     STARDEW_CONFIG_DIR=/data/config \
     STARDEW_LOG_DIR=/data/logs \
+    MODS_PATH=/data/mods \
     PORT=24642 \
     WEB_PORT=8080 \
     REDIS_HOST=redis \
