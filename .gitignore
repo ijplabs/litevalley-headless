@@ -13,6 +13,10 @@ Lidgren.Network.dll
 MonoGame.Framework.dll
 xTile.dll
 
+# Explicitly whitelist metadata-only stripped reference assemblies (0 IL bytecode) for CI
+!ref-assemblies/
+!ref-assemblies/**
+
 # Game binaries, libraries, and reference assemblies (Zero-Piracy Policy - NEVER COMMIT)
 /lib/
 /lib/stardew-refs/

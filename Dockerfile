@@ -18,7 +18,7 @@ WORKDIR /app
 # Salin file proyek, referensi stardew assemblies, dan restore dependencies
 COPY src/StardewHeadless.Protocol/StardewHeadless.Protocol.csproj src/StardewHeadless.Protocol/
 COPY src/StardewHeadless.Server/StardewHeadless.Server.csproj src/StardewHeadless.Server/
-COPY lib/stardew-refs/ lib/stardew-refs/
+COPY ref-assemblies/ ref-assemblies/
 RUN dotnet restore src/StardewHeadless.Server/StardewHeadless.Server.csproj
 
 # Salin seluruh source code

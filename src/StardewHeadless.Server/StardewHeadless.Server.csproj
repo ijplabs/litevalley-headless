@@ -9,7 +9,7 @@
     <RollForward>Major</RollForward>
     <GamePath Condition="'$(GamePath)' == '' and '$(STARDEW_GAME_DIR)' != ''">$(STARDEW_GAME_DIR)</GamePath>
     <GamePath Condition="'$(GamePath)' == '' and Exists('D:\SteamLibrary\steamapps\common\Stardew Valley\Stardew Valley.dll')">D:\SteamLibrary\steamapps\common\Stardew Valley</GamePath>
-    <GamePath Condition="'$(GamePath)' == '' and Exists('$(MSBuildThisFileDirectory)..\..\lib\stardew-refs\Stardew Valley.dll')">$(MSBuildThisFileDirectory)..\..\lib\stardew-refs</GamePath>
+    <GamePath Condition="'$(GamePath)' == '' and Exists('$(MSBuildThisFileDirectory)..\..\ref-assemblies\Stardew Valley.dll')">$(MSBuildThisFileDirectory)..\..\ref-assemblies</GamePath>
     <GamePath Condition="'$(GamePath)' == ''">/data/game</GamePath>
   </PropertyGroup>
 
