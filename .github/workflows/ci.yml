@@ -1,0 +1,49 @@
+name: CI Build & Verify
+
+on:
+  push:
+    branches: [ "main", "dev" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  build:
+    name: Build & Test
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+
+    - name: Setup Bun
+      uses: oven-sh/setup-bun@v2
+      with:
+        bun-version: 1.4.4
+
+    - name: Build Web UI Control Panel
+      working-directory: src/StardewHeadless.WebUI
+      run: |
+        bun install --frozen-lockfile || bun install
+        bun run build
+
+    - name: Setup .NET SDK
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: '6.0.x'
+
+    - name: Restore Dependencies
+      run: dotnet restore LiteValley.Headless.sln
+
+    - name: Build Solution
+      run: dotnet build LiteValley.Headless.sln -c Release --no-restore
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Verify Docker Build
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        file: ./Dockerfile
+        push: false
+        tags: litevalley-headless:test

@@ -1,0 +1,99 @@
+version: '3.8'
+
+# ====================================================================
+# LiteValley Headless - All-In-One Dedicated Game Server Stack
+# ====================================================================
+# Stack ini mencakup:
+# 1. stardew-server   : Headless server (.NET 6) + Web UI Control Panel (Kestrel 8080)
+# 2. redis            : In-Memory cache & pub/sub broker
+# 3. steam-downloader : Downloader resmi aset Stardew Valley berlisensi (sdvd/steam-service)
+# ====================================================================
+
+services:
+  stardew-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ghcr.io/ijplabs/litevalley-headless:latest
+    container_name: litevalley-headless
+    restart: unless-stopped
+    ports:
+      - "${PORT:-24642}:24642/udp"      # Netcode Lidgren UDP (Buka port ini di firewall/port forwarding)
+      - "${WEB_PORT:-5000}:8080/tcp"    # Web Control Panel & REST API HTTP
+    volumes:
+      - game-data:/data/game:ro         # Berkas game resmi berlisensi (Read-Only)
+      - ./saves:/data/saves             # Berkas save game multiplayer
+      - ./saves:/root/.config/StardewValley/Saves # Path native save Stardew Valley
+      - ./config:/data/config           # Database SQLite, konfigurasi server, & akun pemain
+      - ./logs:/data/logs               # Log server & audit trail
+    environment:
+      - STARDEW_GAME_DIR=/data/game
+      - STARDEW_SAVE_DIR=/data/saves
+      - STARDEW_CONFIG_DIR=/data/config
+      - STARDEW_LOG_DIR=/data/logs
+      - PORT=24642
+      - WEB_PORT=8080
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-litevalley_redis_secret}
+      - ADMIN_USERNAME=${ADMIN_USERNAME:-admin}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-ChangeMe123!}
+      - SERVER_NAME=${SERVER_NAME:-LiteValley Dedicated Server}
+      - FARM_NAME=${FARM_NAME:-LiteFarm}
+      - FARM_TYPE=${FARM_TYPE:-0}
+      - MAX_PLAYERS=${MAX_PLAYERS:-10}
+      - SERVER_PASSWORD=${SERVER_PASSWORD:-}
+      - TZ=${TZ:-UTC}
+    depends_on:
+      redis:
+        condition: service_started
+      steam-downloader:
+        condition: service_completed_successfully
+
+  redis:
+    image: redis:7-alpine
+    container_name: litevalley-redis
+    restart: unless-stopped
+    command: >
+      redis-server
+      --appendonly yes
+      --requirepass ${REDIS_PASSWORD:-litevalley_redis_secret}
+    volumes:
+      - redis-data:/data
+    expose:
+      - "6379"
+
+  steam-downloader:
+    image: sdvd/steam-service:preview
+    container_name: litevalley-steam-auth
+    restart: "no"
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >
+        if [ -f "/data/game/Stardew Valley.dll" ]; then
+          echo "[SteamService] Berkas Stardew Valley resmi terdeteksi. Melewati unduhan.";
+          exit 0;
+        fi;
+        if [ -n "$$STEAM_REFRESH_TOKEN" ] || [ -n "$$STEAM_PASSWORD" ]; then
+          echo "[SteamService] Mengunduh Stardew Valley berlisensi via Steam Token...";
+          /entrypoint.sh download;
+        else
+          echo "[SteamService] Peringatan: Berkas game belum ada dan STEAM_REFRESH_TOKEN kosong.";
+          echo "[SteamService] Silakan ikuti panduan di README.md untuk mengekstrak Steam Refresh Token.";
+          exit 0;
+        fi
+    volumes:
+      - game-data:/data/game
+      - steam-session:/data/steam-session
+    environment:
+      - STEAM_USERNAME=${STEAM_USERNAME:-}
+      - STEAM_PASSWORD=${STEAM_PASSWORD:-}
+      - STEAM_REFRESH_TOKEN=${STEAM_REFRESH_TOKEN:-}
+
+volumes:
+  game-data:
+    name: litevalley_game_data
+  redis-data:
+    name: litevalley_redis_data
+  steam-session:
+    name: litevalley_steam_session

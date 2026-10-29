@@ -1,0 +1,71 @@
+# Proprietary Game Files (NEVER COMMIT)
+/analysis-workspace/
+/reference/
+/saves/
+/data/
+/config/
+/logs/
+*.xnb
+*.dll
+Stardew Valley.dll
+StardewValley.GameData.dll
+Lidgren.Network.dll
+MonoGame.Framework.dll
+xTile.dll
+
+# Game binaries, libraries, and reference assemblies (Zero-Piracy Policy - NEVER COMMIT)
+/lib/
+/lib/stardew-refs/
+lib/stardew-refs/
+
+# Databases and Runtime State
+*.db
+*.sqlite
+*.sqlite3
+
+# Logs and Certificates
+*.log
+log-*.txt
+*.pem
+*.key
+*.crt
+*.pfx
+*.cert
+
+# .NET Build Artifacts
+[Bb]in/
+[Oo]bj/
+[Dd]ebug/
+[Rr]elease/
+x64/
+x86/
+[Aa][Rr][Mm]/
+[Aa][Rr][Mm]64/
+bld/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+.vs/
+*.nupkg
+*.snupkg
+
+# Node / Web UI Artifacts
+node_modules/
+dist/
+
+# Environment files
+.env
+.env.*
+!.env.example
+*.local.env
+
+# Docker Local Persistent Volumes
+/redis-data/
+/steam-cache/
+/game-assets/
+
+# OS files
+.DS_Store
+Thumbs.db
+/scratch/
