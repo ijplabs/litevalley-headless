@@ -988,7 +988,7 @@ public static class KestrelWebServer
                 var entry = archive.CreateEntry("manifest.json");
                 using var entryStream = entry.Open();
                 using var writer = new StreamWriter(entryStream);
-                writer.Write("{\"Name\": \"StardewBridge\", \"Version\": \"0.1.0\", \"UniqueID\": \"IJP.StardewBridge\"}");
+                writer.Write("{\"Name\": \"StardewBridge\", \"Version\": \"0.2.0\", \"UniqueID\": \"IJP.StardewBridge\"}");
             }
             return Results.File(memoryStream.ToArray(), "application/zip", "StardewBridge.zip");
         });
