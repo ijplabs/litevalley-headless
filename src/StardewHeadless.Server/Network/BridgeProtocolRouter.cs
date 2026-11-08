@@ -21,7 +21,7 @@ public static class BridgeProtocolRouter
     private static readonly ConcurrentDictionary<long, CancellationTokenSource> _auditDeadlineCts = new();
     public static Action<long>? OnAuditDeadlineKickOverride { get; set; }
 
-    public static void StartAuditDeadline(GameServer? server, long farmerId, TimeSpan? timeout = null)
+    public static void StartAuditDeadline(StardewValley.Network.IGameServer? server, long farmerId, TimeSpan? timeout = null)
     {
         CancelAuditDeadline(farmerId);
         var cts = new CancellationTokenSource();
@@ -41,7 +41,17 @@ public static class BridgeProtocolRouter
                     }
                     else
                     {
-                        server?.kick(farmerId);
+                        ServerHost.EnqueueMainThreadAction(() =>
+                        {
+                            try
+                            {
+                                server?.kick(farmerId);
+                            }
+                            catch (Exception ex)
+                            {
+                                _logger?.Error("ModAudit", $"Gagal melakukan kick farmer {farmerId} pada main thread", null, ex);
+                            }
+                        });
                     }
                 }
             }
@@ -120,6 +130,10 @@ public static class BridgeProtocolRouter
                     HandleSkullElevatorRequest(server, message.FarmerID, elevatorReq);
                     break;
 
+                case ClientIntegrityHeartbeatPacket integrityHeartbeat:
+                    HandleClientIntegrityHeartbeat(server, message.FarmerID, integrityHeartbeat);
+                    break;
+
                 default:
                     _logger?.Debug("BridgeRouter", $"Menerima paket sub-opcode 0x{subOpCode:X2} ({packet.GetType().Name}) dari FarmerId={message.FarmerID}");
                     break;
@@ -128,6 +142,27 @@ public static class BridgeProtocolRouter
         catch (Exception ex)
         {
             _logger?.Error("BridgeRouter", $"Exception saat menangani paket sub-opcode 0x{subOpCode:X2}", null, ex);
+        }
+    }
+
+    private static void HandleClientIntegrityHeartbeat(GameServer server, long farmerId, ClientIntegrityHeartbeatPacket heartbeat)
+    {
+        _logger?.Debug("AntiCheat", $"Menerima ClientIntegrityHeartbeat (0x9C) dari FarmerId={farmerId}, Nonce={heartbeat.Nonce}, Patches={heartbeat.DetectedPatches?.Count ?? 0}");
+
+        // 1. Validasi Tanda Tangan Digital HMAC
+        if (!heartbeat.VerifySignature("StardewBridgeDefaultKey"))
+        {
+            _logger?.Warn("AntiCheat", $"[INTEGRITY VIOLATION] Signature 0x9C tidak valid dari FarmerId={farmerId}!");
+            _ = Security.AntiCheat.AntiCheatCoordinator.TriggerViolationAsync(farmerId, $"Farmer_{farmerId}", null, "InvalidHeartbeatSignature", 2, "HMAC-SHA256 signature mismatch pada paket 0x9C");
+            return;
+        }
+
+        // 2. Evaluasi Anomali Harmony Patch Terlarang
+        if (heartbeat.DetectedPatches != null && heartbeat.DetectedPatches.Count > 0)
+        {
+            var anomalies = string.Join("; ", heartbeat.DetectedPatches.Select(p => $"{p.MethodName} oleh {p.PatchOwnerId} ({p.PatchAssemblyName})"));
+            _logger?.Warn("AntiCheat", $"[HARMONY INJECTION] Terdeteksi modifikasi patch terlarang dari FarmerId={farmerId}: {anomalies}");
+            _ = Security.AntiCheat.AntiCheatCoordinator.TriggerViolationAsync(farmerId, $"Farmer_{farmerId}", null, "IllegalHarmonyPatch", 2, $"Injeksi patch terlarang: {anomalies}");
         }
     }
 
@@ -223,19 +258,14 @@ public static class BridgeProtocolRouter
 
                 if (responsePacket is AuthSuccessPacket success && targetFarmer != null)
                 {
-                    // Kirim Starter Kit Grant 0x9A HANYA jika belum pernah diklaim sebelumnya
-                    var db = ServerHost.Database;
-                    var user = db != null ? await db.GetUserByLinkedFarmerAsync(farmerId, targetFarmer.Name) : null;
-                    var userProf = (db != null && user != null) ? await db.GetProfessionAsync(user.Id) : null;
-                    if (userProf == null || !userProf.StarterKitClaimed)
+                    var authState = Security.LobbyGatekeeper.GetAuthState(farmerId);
+                    if (authState != null && authState.ShouldGrantStarterKit)
                     {
+                        authState.ShouldGrantStarterKit = false;
                         var grantPacket = World.StarterKitDelivery.CreateGrantPacket(farmerId, success.LockedProfession, Game1.currentSeason, success.SessionToken);
                         byte[] grantPayload = grantPacket.Serialize();
                         server.sendMessage(farmerId, new OutgoingMessage(33, Game1.player.UniqueMultiplayerID, (object)grantPayload));
-                        if (db != null && user != null)
-                        {
-                            await db.ClaimStarterKitAsync(user.Id);
-                        }
+                        _logger?.Info("StarterKit", $"[0x9A] Paket StarterKitGrantPacket terkirim ke FarmerId={farmerId} ({success.LockedProfession.ToUpper()})");
                     }
 
                     // Sinkronisasi Skill Level & kirim 0xA0 ProfessionBuffSyncPacket
@@ -373,7 +403,7 @@ public static class BridgeProtocolRouter
 
                 if (farmer != null)
                 {
-                    farmer.Money = Math.Max(0, farmer.Money - respec.feeDeducted);
+                    World.FarmerWalletHelper.DeductMoney(farmer, respec.feeDeducted);
                     farmer.modData["svheadless/profession"] = prof;
                 }
 
@@ -413,13 +443,13 @@ public static class BridgeProtocolRouter
         if (farmer == null || req.Amount <= 0) return;
 
         // Validasi dan potong saldo dompet di main thread secara otoritatif
-        if (farmer.Money < req.Amount)
+        if (World.FarmerWalletHelper.GetMoney(farmer) < req.Amount)
         {
             _logger?.Warn("Economy", $"[KAS DESA] Donasi ditolak: Dompet '{name}' ({farmer.Money}g) tidak mencukupi untuk mendonasikan {req.Amount}g.");
             return;
         }
 
-        farmer.Money -= req.Amount;
+        World.FarmerWalletHelper.DeductMoney(farmer, req.Amount);
 
         Task.Run(async () =>
         {
@@ -598,14 +628,14 @@ public static class BridgeProtocolRouter
         }
 
         // 5. Cek Saldo Pemain
-        if (farmer.Money < fee)
+        if (World.FarmerWalletHelper.GetMoney(farmer) < fee)
         {
             SendSkullElevatorResponse(server, farmerId, req.TargetFloor, 0, false, $"Saldo tidak mencukupi! Biaya lift: {fee}g, saldo Anda: {farmer.Money}g.");
             return;
         }
 
         // 6. Potong saldo & Setor ke Kas Desa
-        farmer.Money -= fee;
+        World.FarmerWalletHelper.DeductMoney(farmer, fee);
 
         Task.Run(async () =>
         {

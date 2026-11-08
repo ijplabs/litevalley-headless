@@ -27,6 +27,9 @@ public static class Program
         var logPath = Path.Combine(logsDir, "headless-server.log");
         using var logger = new StructuredLogger("HeadlessServer", jsonlPath, logPath, echoToConsole: true);
 
+        // Inisialisasi Pelapor Crash & Runtime Diagnostics (Opsional & Senyap jika tidak disetel)
+        Services.CrashReporter.Initialize(logger);
+
         logger.Info("Compliance", "=========================================================");
         logger.Info("Compliance", "LiteValley Dedicated Server - Genuine License Compliance");
         logger.Info("Compliance", "Tribute to Eric Barone (ConcernedApe) for creating Stardew Valley.");

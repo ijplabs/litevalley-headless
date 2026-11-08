@@ -34,10 +34,11 @@ public static class WorldDeltaBroadcaster
     public static void Initialize(StructuredLogger? logger)
     {
         _logger = logger;
+        RustBroadcasterClient.Initialize(logger);
     }
 
-    public static int SubscriberCount => Subscribers.Count;
-    public static bool HasSubscribers => !Subscribers.IsEmpty;
+    public static int SubscriberCount => Subscribers.Count + (RustBroadcasterClient.IsConnected ? RustBroadcasterClient.ActiveSubscribers : 0);
+    public static bool HasSubscribers => (RustBroadcasterClient.IsConnected && RustBroadcasterClient.ActiveSubscribers > 0) || !Subscribers.IsEmpty;
 
     public static string RegisterSubscriber(Channel<WorldEntityDeltaEvent> channel)
     {
@@ -53,10 +54,11 @@ public static class WorldDeltaBroadcaster
 
     /// <summary>
     /// Menyiarkan event perubahan visual/objek dunia ke seluruh browser yang berlangganan SSE.
+    /// Memprioritaskan pengaliran via microservice Rust litevalley-broadcaster untuk zero-overhead.
     /// </summary>
     public static void Broadcast(string eventType, string location, string entityId, int tileX, int tileY, string? spriteKey = null, object? extra = null)
     {
-        if (Subscribers.IsEmpty) return; // Zero-overhead guard
+        if (!HasSubscribers) return; // Zero-overhead guard
 
         var deltaEvent = new WorldEntityDeltaEvent(
             EventType: eventType,
@@ -69,9 +71,19 @@ public static class WorldDeltaBroadcaster
             TimestampTicks: DateTime.UtcNow.Ticks
         );
 
-        foreach (var sub in Subscribers)
+        // 1. Alirkan ke Rust litevalley-broadcaster jika aktif (Zero-Allocation ke C# Web Subscribers)
+        if (RustBroadcasterClient.IsConnected)
         {
-            sub.Value.Writer.TryWrite(deltaEvent);
+            RustBroadcasterClient.TryEnqueue(deltaEvent);
+        }
+
+        // 2. Alirkan ke internal subscribers C# (Fallback jika ada subscriber Kestrel lokal)
+        if (!Subscribers.IsEmpty)
+        {
+            foreach (var sub in Subscribers)
+            {
+                sub.Value.Writer.TryWrite(deltaEvent);
+            }
         }
     }
 

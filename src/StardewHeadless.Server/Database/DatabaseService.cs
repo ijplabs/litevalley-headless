@@ -26,7 +26,8 @@ public class DatabaseService : IDatabaseService
             DataSource = dbPath,
             Mode = SqliteOpenMode.ReadWriteCreate,
             Cache = SqliteCacheMode.Shared,
-            DefaultTimeout = 30
+            DefaultTimeout = 30,
+            ForeignKeys = true
         }.ToString();
     }
     private IDbConnection CreateConnection() => new SqliteConnection(_connectionString);
@@ -605,10 +606,39 @@ public class DatabaseService : IDatabaseService
     {
         var user = await GetUserAsync(username);
         if (user == null || user.IsBanned) return false;
-        var inputHash = HashPassword(password, user.Salt);
-        return CryptographicOperations.FixedTimeEquals(
-            Encoding.UTF8.GetBytes(inputHash),
+
+        if (user.PasswordHash.StartsWith("$pbkdf2$"))
+        {
+            var computed = HashPassword(password, user.Salt);
+            return CryptographicOperations.FixedTimeEquals(
+                Encoding.UTF8.GetBytes(computed),
+                Encoding.UTF8.GetBytes(user.PasswordHash));
+        }
+
+        // Backward compatibility: verifikasi hash SHA256 1-round warisan lama
+        using var sha256 = SHA256.Create();
+        byte[] legacyBytes = sha256.ComputeHash(Encoding.UTF8.GetBytes(password + user.Salt));
+        string legacyHash = Convert.ToBase64String(legacyBytes);
+        bool isValid = CryptographicOperations.FixedTimeEquals(
+            Encoding.UTF8.GetBytes(legacyHash),
             Encoding.UTF8.GetBytes(user.PasswordHash));
+
+        if (isValid)
+        {
+            // Upgrade transparan & otomatis ke PBKDF2 (100.000 iterasi) saat login berhasil
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    var newHash = HashPassword(password, user.Salt);
+                    using var conn = CreateConnection();
+                    await conn.ExecuteAsync("UPDATE users SET password_hash = @Hash WHERE id = @Id", new { Hash = newHash, Id = user.Id });
+                }
+                catch { }
+            });
+        }
+
+        return isValid;
     }
     public async Task<string?> GetTotpSecretAsync(string username)
     {
@@ -1387,10 +1417,10 @@ public class DatabaseService : IDatabaseService
     }
     private static string HashPassword(string password, string salt)
     {
-        using var sha256 = SHA256.Create();
-        byte[] saltedBytes = Encoding.UTF8.GetBytes(password + salt);
-        byte[] hashBytes = sha256.ComputeHash(saltedBytes);
-        return Convert.ToBase64String(hashBytes);
+        byte[] saltBytes = Encoding.UTF8.GetBytes(salt);
+        using var pbkdf2 = new Rfc2898DeriveBytes(password, saltBytes, 100_000, HashAlgorithmName.SHA256);
+        byte[] hashBytes = pbkdf2.GetBytes(32);
+        return "$pbkdf2$100000$" + Convert.ToBase64String(hashBytes);
     }
     #endregion
     public async Task RecordAntiCheatIncidentAsync(long farmerId, string username, string? hwid, string incidentType, int severityLevel, string actionTaken, string? details)

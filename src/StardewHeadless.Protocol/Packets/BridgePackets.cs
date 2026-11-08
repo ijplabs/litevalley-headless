@@ -1,3 +1,4 @@
+using System.Security.Cryptography;
 using System.Text;
 using StardewHeadless.Protocol.Enums;
 
@@ -478,7 +479,7 @@ public class ClientModAuditPacket : BridgePacket
     {
         FarmerId = reader.ReadInt64();
         HwidHash = reader.ReadString();
-        int count = reader.ReadInt32();
+        int count = Math.Clamp(reader.ReadInt32(), 0, 512);
         InstalledMods = new List<ClientModInfo>(count);
         for (int i = 0; i < count; i++)
         {
@@ -487,12 +488,9 @@ public class ClientModAuditPacket : BridgePacket
                 ModId = reader.ReadString(),
                 ModName = reader.ReadString(),
                 Version = reader.ReadString(),
-                HasBinary = reader.ReadBoolean()
+                HasBinary = reader.ReadBoolean(),
+                DllSha256 = reader.ReadString()
             };
-            if (reader.BaseStream.Position < reader.BaseStream.Length)
-            {
-                info.DllSha256 = reader.ReadString();
-            }
             InstalledMods.Add(info);
         }
     }
@@ -559,7 +557,7 @@ public class ClientIntegrityHeartbeatPacket : BridgePacket
         TimestampTicks = reader.ReadInt64();
         Nonce = reader.ReadString();
         Signature = reader.ReadString();
-        int count = reader.ReadInt32();
+        int count = Math.Clamp(reader.ReadInt32(), 0, 512);
         DetectedPatches = new List<HarmonyPatchAnomaly>(count);
         for (int i = 0; i < count; i++)
         {
@@ -570,6 +568,23 @@ public class ClientIntegrityHeartbeatPacket : BridgePacket
                 PatchAssemblyName = reader.ReadString()
             });
         }
+    }
+
+    public static string ComputeSignature(long farmerId, long timestampTicks, string nonce, string secretKey = "StardewBridgeDefaultKey")
+    {
+        string payload = $"{farmerId}:{timestampTicks}:{nonce}";
+        byte[] keyBytes = Encoding.UTF8.GetBytes(string.IsNullOrEmpty(secretKey) ? "StardewBridgeDefaultKey" : secretKey);
+        byte[] payloadBytes = Encoding.UTF8.GetBytes(payload);
+
+        using var hmac = new HMACSHA256(keyBytes);
+        byte[] hash = hmac.ComputeHash(payloadBytes);
+        return Convert.ToHexString(hash).ToLowerInvariant();
+    }
+
+    public bool VerifySignature(string secretKey = "StardewBridgeDefaultKey")
+    {
+        string expected = ComputeSignature(FarmerId, TimestampTicks, Nonce, secretKey);
+        return string.Equals(expected, Signature, StringComparison.OrdinalIgnoreCase);
     }
 }
 

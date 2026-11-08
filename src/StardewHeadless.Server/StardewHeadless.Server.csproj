@@ -21,9 +21,14 @@
     <ProjectReference Include="..\StardewHeadless.Protocol\StardewHeadless.Protocol.csproj" />
     <PackageReference Include="Lib.Harmony" Version="2.4.3" />
     <PackageReference Include="StackExchange.Redis" Version="2.7.27" />
-    <PackageReference Include="Microsoft.Data.Sqlite" Version="8.0.10" />
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="8.0.12" />
+    <PackageReference Include="SourceGear.sqlite3" Version="3.53.4" />
     <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="2.1.10" />
     <PackageReference Include="Dapper" Version="2.1.35" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <NuGetAuditSuppress Include="https://github.com/advisories/GHSA-2m69-gcr7-jv3q" />
   </ItemGroup>
 
   <!-- Reference Stardew Valley assemblies from the game installation -->

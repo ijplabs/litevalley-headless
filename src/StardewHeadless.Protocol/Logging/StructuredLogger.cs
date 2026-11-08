@@ -19,6 +19,11 @@ public class StructuredLogger : IDisposable
     private readonly bool _echoToConsole;
     private readonly object _lock = new();
 
+    /// <summary>
+    /// Event hook eksternal saat terjadi log level Error atau Fatal (misal dikirim ke IJPLabs Telemetry Gateway).
+    /// </summary>
+    public static Action<LogLevel, string, string, string, Exception?>? OnErrorCaptured;
+
     private readonly ConcurrentQueue<LogEntry> _memoryBuffer = new();
     private const int MaxBufferSize = 1000;
 
@@ -123,6 +128,12 @@ public class StructuredLogger : IDisposable
             Details = details,
             Exception = exception?.ToString()
         };
+
+        // Notifikasi ke sistem error tracking (IJPLabs Telemetry Gateway) jika Error / Fatal
+        if (level is LogLevel.Error or LogLevel.Fatal)
+        {
+            try { OnErrorCaptured?.Invoke(level, _source, category, message, exception); } catch { }
+        }
 
         // Simpan ke ring-buffer memori untuk query cepat API Sysadmin
         _memoryBuffer.Enqueue(entry);

@@ -34,6 +34,43 @@ public static class KestrelWebServer
     private static IEmailService? _emailService;
     private static ServerConfig? _config;
     private static readonly Stopwatch _uptimeStopwatch = Stopwatch.StartNew();
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, (string Username, string Role, DateTime ExpiresAt)> _activeSessions = new();
+
+    public static bool TryGetSession(string? token, out (string Username, string Role) session)
+    {
+        if (!string.IsNullOrEmpty(token) && _activeSessions.TryGetValue(token, out var s))
+        {
+            if (DateTime.UtcNow <= s.ExpiresAt)
+            {
+                session = (s.Username, s.Role);
+                return true;
+            }
+            _activeSessions.TryRemove(token, out _);
+        }
+        session = default;
+        return false;
+    }
+
+    public static void StoreSession(string token, string username, string role, TimeSpan? lifetime = null)
+    {
+        if (string.IsNullOrEmpty(token)) return;
+        DateTime expires = DateTime.UtcNow.Add(lifetime ?? TimeSpan.FromDays(7));
+        _activeSessions[token] = (username, role, expires);
+    }
+
+    public static string CreateAndStoreAdminSession(string username)
+    {
+        string token = Guid.NewGuid().ToString("N");
+        StoreSession(token, username.ToLowerInvariant(), "admin");
+        return token;
+    }
+
+    public static string CreateAndStoreUserSession(string username, string role)
+    {
+        string token = Guid.NewGuid().ToString("N");
+        StoreSession(token, username, role.ToLowerInvariant());
+        return token;
+    }
 
     public static void SetModManager(Mods.ModManagerService modManager) => _modManager = modManager;
 
@@ -155,7 +192,8 @@ public static class KestrelWebServer
             {
                 headerVal = headerVal.Substring(7).Trim();
             }
-            if (string.Equals(headerVal, config.AdminPin.Trim(), StringComparison.Ordinal))
+            if (string.Equals(headerVal, config.AdminPin.Trim(), StringComparison.Ordinal) ||
+                (TryGetSession(headerVal, out var s) && (s.Role.Equals("admin", StringComparison.OrdinalIgnoreCase) || s.Role.Equals("host", StringComparison.OrdinalIgnoreCase))))
             {
                 return true;
             }
@@ -516,47 +554,92 @@ public static class KestrelWebServer
             return Results.Ok(realProjects);
         });
 
-        // 6. Inter-Profession Bounty Contracts
-        app.MapGet("/api/contracts", () =>
+        // 6. Inter-Profession Bounty Contracts (SQLite-Backed Live Economy)
+        app.MapGet("/api/contracts", async (string? status) =>
         {
-            var contracts = new[]
+            if (_dbService != null)
             {
-                new
+                var dbContracts = await _dbService.GetBountyContractsAsync(status);
+                var list = dbContracts.ToList();
+                if (list.Count > 0)
                 {
-                    id = 1,
-                    posterName = "Agus (Farmer)",
-                    requestedProfession = "Miner",
-                    title = "Butuh 50 Tembaga (Copper Ore) & 20 Batu Bara",
-                    description = "Dibutuhkan untuk membuat 5x Quality Sprinkler sebelum tanggal 20.",
-                    rewardGold = 1500,
-                    status = "Open",
-                    createdAt = DateTime.UtcNow.AddHours(-2).ToString("o")
-                },
-                new
-                {
-                    id = 2,
-                    posterName = "Bambang (Miner)",
-                    requestedProfession = "Fisherman",
-                    title = "Ransum Makanan Penambah Stamina Gua (10 Ikan Masak)",
-                    description = "Pasokan makanan habis di level 60 tambang.",
-                    rewardGold = 900,
-                    status = "In Progress",
-                    createdAt = DateTime.UtcNow.AddHours(-5).ToString("o")
-                },
-                new
-                {
-                    id = 3,
-                    posterName = "Citra (Rancher)",
-                    requestedProfession = "Forager",
-                    title = "Butuh 150 Kayu Ek & 20 Hardwood",
-                    description = "Bahan baku ekspansi Deluxe Barn untuk peternakan sapi dan kambing.",
-                    rewardGold = 2200,
-                    status = "Open",
-                    createdAt = DateTime.UtcNow.AddHours(-1).ToString("o")
+                    return Results.Ok(list);
                 }
-            };
+            }
 
-            return Results.Ok(contracts);
+            // Fallback starter bounty contracts jika database belum memiliki catatan
+            var defaultContracts = new[]
+            {
+                new { id = 1, creatorUserId = 1, claimerUserId = (long?)null, itemName = "Parsnip", quantity = 10, rewardGold = 350, status = "Open", createdAt = DateTime.UtcNow.ToString("o") },
+                new { id = 2, creatorUserId = 2, claimerUserId = (long?)null, itemName = "Copper Bar", quantity = 5, rewardGold = 600, status = "Open", createdAt = DateTime.UtcNow.ToString("o") }
+            };
+            return Results.Ok(defaultContracts);
+        });
+
+        app.MapPost("/api/contracts", async (HttpContext ctx, JsonElement body) =>
+        {
+            if (_dbService == null) return Results.StatusCode(503);
+
+            string? authHeader = ctx.Request.Headers["Authorization"].FirstOrDefault();
+            long userId = 1;
+            if (authHeader != null && authHeader.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase))
+            {
+                var token = authHeader.Substring(7).Trim();
+                if (TryGetSession(token, out var sess) && _dbService != null)
+                {
+                    var u = await _dbService.GetUserAsync(sess.Username);
+                    if (u != null) userId = u.Id;
+                }
+            }
+
+            if (!body.TryGetProperty("itemName", out var itemElem) || string.IsNullOrWhiteSpace(itemElem.GetString()))
+            {
+                return Results.BadRequest(new { error = "itemName wajib diisi." });
+            }
+            string itemName = itemElem.GetString()!;
+            int quantity = body.TryGetProperty("quantity", out var qElem) ? qElem.GetInt32() : 1;
+            int rewardGold = body.TryGetProperty("rewardGold", out var rElem) ? rElem.GetInt32() : 100;
+            if (body.TryGetProperty("creatorUserId", out var uElem)) userId = uElem.GetInt64();
+
+            long newId = await _dbService.CreateBountyContractAsync(userId, itemName, quantity, rewardGold);
+            return Results.Created($"/api/contracts/{newId}", new { id = newId, success = true });
+        });
+
+        app.MapPost("/api/contracts/{id:long}/claim", async (long id, JsonElement body) =>
+        {
+            if (_dbService == null) return Results.StatusCode(503);
+            long claimerUserId = body.TryGetProperty("claimerUserId", out var cElem) ? cElem.GetInt64() : 1;
+            bool success = await _dbService.ClaimBountyContractAsync(id, claimerUserId);
+            if (!success) return Results.BadRequest(new { error = "Kontrak tidak ditemukan atau sudah diklaim." });
+            return Results.Ok(new { id, success = true, status = "InProgress" });
+        });
+
+        app.MapPost("/api/contracts/{id:long}/complete", async (long id) =>
+        {
+            if (_dbService == null) return Results.StatusCode(503);
+            bool success = await _dbService.CompleteBountyContractAsync(id);
+            if (!success) return Results.BadRequest(new { error = "Gagal menyelesaikan kontrak." });
+            return Results.Ok(new { id, success = true, status = "Completed" });
+        });
+
+        app.MapPost("/api/contracts/{id:long}/cancel", async (long id, JsonElement body) =>
+        {
+            if (_dbService == null) return Results.StatusCode(503);
+            long requesterUserId = body.TryGetProperty("requesterUserId", out var rElem) ? rElem.GetInt64() : 1;
+            bool success = await _dbService.CancelBountyContractAsync(id, requesterUserId);
+            if (!success) return Results.BadRequest(new { error = "Gagal membatalkan kontrak." });
+            return Results.Ok(new { id, success = true, status = "Cancelled" });
+        });
+
+        // 6b. Automate Machine Groups & Topology Endpoint
+        app.MapGet("/api/v2/world/automation", async () =>
+        {
+            var groups = await ServerHost.EnqueueMainThreadFuncAsync(() =>
+            {
+                var farm = Game1.getFarm();
+                return farm != null ? Mods.AutomateCompatibilityBridge.ScanAutomateGroups(farm) : new List<Mods.AutomateGroupInfo>();
+            });
+            return Results.Ok(groups);
         });
 
         // 7. Auth Login Endpoint
@@ -595,7 +678,7 @@ public static class KestrelWebServer
                 return Results.Ok(new
                 {
                     success = true,
-                    token = Guid.NewGuid().ToString("N"),
+                    token = CreateAndStoreAdminSession(username),
                     role = "admin",
                     username = username.ToLowerInvariant(),
                     userId = 0L
@@ -637,7 +720,7 @@ public static class KestrelWebServer
             return Results.Ok(new
             {
                 success = true,
-                token = Guid.NewGuid().ToString("N"),
+                token = CreateAndStoreUserSession(user.Username, user.Role),
                 role = user.Role.ToLowerInvariant(),
                 username = user.Username,
                 email = user.Email,
@@ -714,7 +797,7 @@ public static class KestrelWebServer
             return Results.Ok(new
             {
                 success = true,
-                token = Guid.NewGuid().ToString("N"),
+                token = CreateAndStoreUserSession(newUser.Username, newUser.Role),
                 requiresVerification = !isLegacyNoEmail,
                 userId = newUser.Id,
                 username = newUser.Username,
@@ -760,7 +843,7 @@ public static class KestrelWebServer
             return Results.Ok(new
             {
                 success = true,
-                token = Guid.NewGuid().ToString("N"),
+                token = CreateAndStoreUserSession(user?.Username ?? identifier, user?.Role ?? "player"),
                 userId = user?.Id ?? 0L,
                 username = user?.Username ?? "",
                 email = user?.Email ?? "",
@@ -855,7 +938,7 @@ public static class KestrelWebServer
                 }
                 else if (!string.IsNullOrEmpty(token))
                 {
-                    isOwner = await _dbService.VerifyPasswordAsync(username, token);
+                    isOwner = (TryGetSession(token, out var sess) && sess.Username.Equals(username, StringComparison.OrdinalIgnoreCase)) || await _dbService.VerifyPasswordAsync(username, token);
                 }
 
                 if (!isOwner)
@@ -911,8 +994,13 @@ public static class KestrelWebServer
         });
 
         // 8. Admin In-Game Broadcast
-        app.MapPost("/api/admin/broadcast", (JsonElement body) =>
+        app.MapPost("/api/admin/broadcast", (HttpContext ctx, JsonElement body) =>
         {
+            if (!IsAdminAuthorized(ctx, _config))
+            {
+                return Results.Unauthorized();
+            }
+
             string message = body.TryGetProperty("message", out var m) ? m.GetString() ?? "" : "";
             if (string.IsNullOrWhiteSpace(message))
             {
@@ -943,8 +1031,13 @@ public static class KestrelWebServer
         });
 
         // 9. Admin Force Save
-        app.MapPost("/api/admin/save", async () =>
+        app.MapPost("/api/admin/save", async (HttpContext ctx) =>
         {
+            if (!IsAdminAuthorized(ctx, _config))
+            {
+                return Results.Unauthorized();
+            }
+
             try
             {
                 await ServerHost.EnqueueMainThreadActionAsync(() =>
@@ -961,9 +1054,189 @@ public static class KestrelWebServer
             }
         });
 
-        // 10. Admin Create Fresh World
-        app.MapPost("/api/admin/world/create", async (JsonElement body) =>
+        // 9b. Admin Export Savegame as Zip Archive
+        app.MapGet("/api/admin/save/export", async (HttpContext ctx) =>
         {
+            if (!IsAdminAuthorized(ctx, _config))
+            {
+                return Results.Unauthorized();
+            }
+
+            string saveDir = _config?.SaveDir ?? "/data/saves";
+            if (!Directory.Exists(saveDir))
+            {
+                return Results.NotFound(new { error = "Direktori save tidak ditemukan." });
+            }
+
+            var dirInfo = new DirectoryInfo(saveDir);
+            var latestDir = dirInfo.GetDirectories()
+                .Where(d => !d.Name.Equals("archive", StringComparison.OrdinalIgnoreCase))
+                .OrderByDescending(d => d.LastWriteTimeUtc)
+                .FirstOrDefault();
+
+            if (latestDir == null)
+            {
+                return Results.NotFound(new { error = "Belum ada savegame yang tersimpan di server." });
+            }
+
+            var tempZip = Path.Combine(Path.GetTempPath(), $"save_export_{Guid.NewGuid():N}.zip");
+
+            // Prioritas 1: Gunakan Rust Save Engine (Zero-LOH Streaming)
+            bool rustExported = await Services.RustSaveEngineBridge.ExportZipAsync(latestDir.FullName, tempZip, _logger);
+            if (!rustExported)
+            {
+                // Fallback: .NET ZipFile
+                System.IO.Compression.ZipFile.CreateFromDirectory(latestDir.FullName, tempZip);
+            }
+
+            // Alirkan file dengan FileStream DeleteOnClose (tanpa memuat seluruh byte ke RAM / LOH)
+            var stream = new FileStream(tempZip, FileMode.Open, FileAccess.Read, FileShare.Read, 64 * 1024, FileOptions.DeleteOnClose);
+            return Results.File(stream, "application/zip", $"{latestDir.Name}.zip");
+        });
+
+        // 9c. Admin Inspect Active Savegame Metadata (Fast Rust SAX Reader)
+        app.MapGet("/api/admin/save/inspect", async (HttpContext ctx) =>
+        {
+            if (!IsAdminAuthorized(ctx, _config))
+            {
+                return Results.Unauthorized();
+            }
+
+            string saveDir = _config?.SaveDir ?? "/data/saves";
+            if (!Directory.Exists(saveDir))
+            {
+                return Results.NotFound(new { error = "Direktori save tidak ditemukan." });
+            }
+
+            var dirInfo = new DirectoryInfo(saveDir);
+            var latestDir = dirInfo.GetDirectories()
+                .Where(d => !d.Name.Equals("archive", StringComparison.OrdinalIgnoreCase))
+                .OrderByDescending(d => d.LastWriteTimeUtc)
+                .FirstOrDefault();
+
+            if (latestDir == null)
+            {
+                return Results.NotFound(new { error = "Belum ada savegame yang tersimpan di server." });
+            }
+
+            var meta = await Services.RustSaveEngineBridge.InspectSaveAsync(latestDir.FullName, _logger);
+            if (meta != null)
+            {
+                return Results.Ok(meta);
+            }
+
+            // Fallback C# summary jika Rust belum terpasang (Gunakan snake_case seragam dengan Rust DTO)
+            return Results.Ok(new
+            {
+                valid = true,
+                farm_name = _config?.FarmName ?? latestDir.Name,
+                farm_type = _config?.FarmType ?? 0,
+                farm_type_name = "Standard",
+                unique_id = latestDir.Name,
+                in_game_date = new { season = "unknown", day = 1, year = 1, display = "Aktif" },
+                host = new { name = "Host", money = 500, total_money_earned = 500L, daily_luck = 0.0 },
+                cabins_count = _config?.StartingCabins ?? 4,
+                source_type = "directory_csharp_fallback"
+            });
+        });
+
+        // 9d. Admin Import Savegame (.zip) with ZipSlip Protection & Auto Cabin Provisioning
+        app.MapPost("/api/admin/save/import", async (HttpContext ctx) =>
+        {
+            if (!IsAdminAuthorized(ctx, _config))
+            {
+                return Results.Unauthorized();
+            }
+
+            string saveDir = _config?.SaveDir ?? "/data/saves";
+            if (!Directory.Exists(saveDir))
+            {
+                Directory.CreateDirectory(saveDir);
+            }
+
+            var tempZip = Path.Combine(Path.GetTempPath(), $"import_upload_{Guid.NewGuid():N}.zip");
+            try
+            {
+                using (var fs = new FileStream(tempZip, FileMode.Create, FileAccess.Write, FileShare.None, 64 * 1024))
+                {
+                    await ctx.Request.Body.CopyToAsync(fs);
+                }
+
+                // Prioritas 1: Rust Save Extractor dengan ZipSlip Protection
+                var importResult = await Services.RustSaveEngineBridge.ImportZipAsync(tempZip, saveDir, _logger);
+                if (importResult == Services.RustBridgeResult.Error)
+                {
+                    return Results.BadRequest(new { error = "Arsip zip savegame ditolak oleh proteksi validasi keamanan (ZipSlip / Corrupt)." });
+                }
+                else if (importResult == Services.RustBridgeResult.NotAvailable)
+                {
+                    // Fallback C# aman dengan validasi canonical path
+                    using var archive = System.IO.Compression.ZipFile.OpenRead(tempZip);
+                    string canonicalBase = Path.GetFullPath(saveDir);
+                    foreach (var entry in archive.Entries)
+                    {
+                        string targetPath = Path.GetFullPath(Path.Combine(saveDir, entry.FullName));
+                        if (!targetPath.StartsWith(canonicalBase, StringComparison.OrdinalIgnoreCase))
+                        {
+                            return Results.BadRequest(new { error = "Terdeteksi potensi path traversal ZipSlip pada arsip savegame." });
+                        }
+                        if (string.IsNullOrEmpty(entry.Name))
+                        {
+                            Directory.CreateDirectory(targetPath);
+                        }
+                        else
+                        {
+                            Directory.CreateDirectory(Path.GetDirectoryName(targetPath)!);
+                            entry.ExtractToFile(targetPath, overwrite: true);
+                        }
+                    }
+                }
+
+                // Auto-Provisioning Kabin Coop jika savegame terdeteksi solo (0 kabin)
+                try
+                {
+                    int targetCabins = _config?.StartingCabins ?? 3;
+                    var dirInfo = new DirectoryInfo(saveDir);
+                    var latestSaveDir = dirInfo.GetDirectories()
+                        .Where(d => !d.Name.Equals("archive", StringComparison.OrdinalIgnoreCase))
+                        .OrderByDescending(d => d.LastWriteTimeUtc)
+                        .FirstOrDefault();
+                    string targetSaveFolder = latestSaveDir?.FullName ?? saveDir;
+
+                    var inspect = await Services.RustSaveEngineBridge.InspectSaveAsync(targetSaveFolder, _logger);
+                    if (inspect != null && inspect.CabinsCount == 0 && targetCabins > 0)
+                    {
+                        _logger?.Info("AdminWeb", $"Savegame solo terdeteksi (0 kabin). Menjalankan Auto-Provisioning {targetCabins} kabin di '{targetSaveFolder}'...");
+                        await Services.RustSaveEngineBridge.EnsureCabinsAsync(targetSaveFolder, targetCabins, _logger);
+                    }
+                }
+                catch (Exception cabinEx)
+                {
+                    _logger?.Warn("AdminWeb", $"Auto-provisioning kabin dilewati: {cabinEx.Message}");
+                }
+
+                _logger?.Info("AdminWeb", "Savegame baru berhasil diimpor ke server via Admin Portal.");
+                return Results.Ok(new { success = true, message = "Savegame berhasil diimpor ke direktori kebun." });
+            }
+            catch (Exception ex)
+            {
+                _logger?.Error("AdminWeb", $"Gagal mengimpor savegame: {ex.Message}", null, ex);
+                return Results.BadRequest(new { error = $"Gagal mengimpor arsip savegame: {ex.Message}" });
+            }
+            finally
+            {
+                try { if (File.Exists(tempZip)) File.Delete(tempZip); } catch { }
+            }
+        });
+
+        // 10. Admin Create Fresh World
+        app.MapPost("/api/admin/world/create", async (HttpContext ctx, JsonElement body) =>
+        {
+            if (!IsAdminAuthorized(ctx, _config))
+            {
+                return Results.Unauthorized();
+            }
+
             string farmName = body.TryGetProperty("farmName", out var fn) ? fn.GetString() ?? "" : "";
             int farmType = body.TryGetProperty("farmType", out var ft) ? ft.GetInt32() : 0;
             int startingCabins = body.TryGetProperty("startingCabins", out var sc) ? sc.GetInt32() : 4;
@@ -1003,8 +1276,13 @@ public static class KestrelWebServer
         });
 
         // 11. Admin Reset / Archive World
-        app.MapPost("/api/admin/world/reset", async (JsonElement body) =>
+        app.MapPost("/api/admin/world/reset", async (HttpContext ctx, JsonElement body) =>
         {
+            if (!IsAdminAuthorized(ctx, _config))
+            {
+                return Results.Unauthorized();
+            }
+
             string confirmFarmName = body.TryGetProperty("confirmFarmName", out var cfn) ? cfn.GetString() ?? "" : "";
             string newFarmName = body.TryGetProperty("newFarmName", out var nfn) ? nfn.GetString() ?? "" : "";
             int? newFarmType = body.TryGetProperty("newFarmType", out var nft) ? nft.GetInt32() : null;
@@ -1052,8 +1330,13 @@ public static class KestrelWebServer
         });
 
         // 12. Admin Purge / Delete Player & Clean World
-        app.MapPost("/api/admin/players/{id:long}/purge", async (long id, JsonElement body) =>
+        app.MapPost("/api/admin/players/{id:long}/purge", async (HttpContext ctx, long id, JsonElement body) =>
         {
+            if (!IsAdminAuthorized(ctx, _config))
+            {
+                return Results.Unauthorized();
+            }
+
             if (_dbService == null) return Results.BadRequest(new { error = "Database server tidak aktif." });
             string reason = body.TryGetProperty("reason", out var r) ? r.GetString() ?? "Manual SysAdmin Purge" : "Manual SysAdmin Purge";
 
@@ -1064,13 +1347,14 @@ public static class KestrelWebServer
             var onlineFarmer = ResolveOnlineFarmer(user, id);
             if (onlineFarmer != null)
             {
-                walletGold = onlineFarmer.Money;
+                walletGold = World.FarmerWalletHelper.GetMoney(onlineFarmer);
             }
 
             int forfeitedGold = await _dbService.PurgePlayerAsync(id, reason, walletGold);
+            long farmerIdToClean = user.LinkedFarmerId ?? (onlineFarmer?.UniqueMultiplayerID ?? id);
             var cleanResult = await ServerHost.EnqueueMainThreadFuncAsync(() =>
             {
-                return WorldCleanupService.CleanWorldForDeletedPlayer(id, _logger);
+                return WorldCleanupService.CleanWorldForDeletedPlayer(farmerIdToClean, _logger);
             });
 
             _logger?.Info("AdminWeb", $"Akun pemain '{user.Username}' (ID: {id}) dibersihkan! Sitaan Uang: {forfeitedGold}g ke Kas Desa. Kabin dibebaskan: {cleanResult.CabinsFreed}. Tanaman publik: {cleanResult.CropsReleased}.");
@@ -1085,8 +1369,13 @@ public static class KestrelWebServer
         });
 
         // 13. Admin Change Profession (Admin Override)
-        app.MapPost("/api/admin/players/{id:long}/change-profession", async (long id, JsonElement body) =>
+        app.MapPost("/api/admin/players/{id:long}/change-profession", async (HttpContext ctx, long id, JsonElement body) =>
         {
+            if (!IsAdminAuthorized(ctx, _config))
+            {
+                return Results.Unauthorized();
+            }
+
             if (_dbService == null) return Results.BadRequest(new { error = "Database server tidak aktif." });
             string newProf = body.TryGetProperty("profession", out var p) ? p.GetString() ?? "" : "";
             if (string.IsNullOrWhiteSpace(newProf))
@@ -1115,8 +1404,13 @@ public static class KestrelWebServer
         });
 
         // 14. Admin Multi-Tier Ban System
-        app.MapPost("/api/admin/players/{id:long}/ban", async (long id, JsonElement body) =>
+        app.MapPost("/api/admin/players/{id:long}/ban", async (HttpContext ctx, long id, JsonElement body) =>
         {
+            if (!IsAdminAuthorized(ctx, _config))
+            {
+                return Results.Unauthorized();
+            }
+
             if (_dbService == null) return Results.BadRequest(new { error = "Database server tidak aktif." });
             string reason = body.TryGetProperty("reason", out var r) ? r.GetString() ?? "Pelanggaran aturan server" : "Pelanggaran aturan server";
             bool banIp = !body.TryGetProperty("banIp", out var bip) || bip.GetBoolean();
@@ -1141,8 +1435,13 @@ public static class KestrelWebServer
             return Results.Ok(new { success = true, message = $"Pemain '{user.Username}' berhasil di-banned." });
         });
 
-        app.MapPost("/api/admin/players/{id:long}/unban", async (long id) =>
+        app.MapPost("/api/admin/players/{id:long}/unban", async (HttpContext ctx, long id) =>
         {
+            if (!IsAdminAuthorized(ctx, _config))
+            {
+                return Results.Unauthorized();
+            }
+
             if (_dbService == null) return Results.BadRequest(new { error = "Database server tidak aktif." });
             var user = await _dbService.GetUserByIdAsync(id);
             if (user == null) return Results.NotFound(new { error = "Pemain tidak ditemukan." });
@@ -1153,8 +1452,13 @@ public static class KestrelWebServer
         });
 
         // 15. Admin Client Mod Manifest Inspection
-        app.MapGet("/api/admin/players/{id:long}/mods", async (long id) =>
+        app.MapGet("/api/admin/players/{id:long}/mods", async (HttpContext ctx, long id) =>
         {
+            if (!IsAdminAuthorized(ctx, _config))
+            {
+                return Results.Unauthorized();
+            }
+
             if (_dbService == null) return Results.BadRequest(new { error = "Database server tidak aktif." });
             var manifests = await _dbService.GetClientModsForUserAsync(id);
             var policies = await _dbService.GetModPoliciesAsync();
@@ -1250,6 +1554,8 @@ public static class KestrelWebServer
         {
             var modMgr = _modManager ?? ServerHost.ModManager;
             if (modMgr == null) return Results.Json(new { error = "Layanan Mod Manager tidak aktif." }, statusCode: 503);
+            const long maxUploadBytes = 100 * 1024 * 1024;
+            if (request.ContentLength.HasValue && request.ContentLength.Value > maxUploadBytes) return Results.Json(new { error = "Ukuran file mod melebihi batas 100 MB." }, statusCode: 413);
 
             if (!request.HasFormContentType)
             {
@@ -1428,26 +1734,45 @@ public static class KestrelWebServer
         });
 
         // 17. Player Self-Respec Profession Endpoint
-        app.MapPost("/api/user/respec-profession", async (JsonElement body) =>
+        app.MapPost("/api/user/respec-profession", async (HttpContext ctx, JsonElement body) =>
         {
             if (_dbService == null) return Results.BadRequest(new { error = "Database server tidak aktif." });
             string username = body.TryGetProperty("username", out var u) ? u.GetString() ?? "" : "";
             string newProf = body.TryGetProperty("newProfession", out var np) ? np.GetString() ?? "" : "";
+            string passwordOrToken = body.TryGetProperty("password", out var pw) ? pw.GetString() ?? "" : "";
 
             if (string.IsNullOrWhiteSpace(username) || string.IsNullOrWhiteSpace(newProf))
             {
                 return Results.BadRequest(new { error = "Username dan profesi tujuan wajib diisi." });
             }
 
+            bool isAdmin = IsAdminAuthorized(ctx, _config);
+            if (!isAdmin)
+            {
+                if (string.IsNullOrWhiteSpace(passwordOrToken))
+                {
+                    string? authHeader = ctx.Request.Headers["Authorization"].FirstOrDefault();
+                    if (authHeader?.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase) == true)
+                    {
+                        passwordOrToken = authHeader.Substring(7).Trim();
+                    }
+                }
+
+                if (string.IsNullOrWhiteSpace(passwordOrToken))
+                {
+                    return Results.Json(new { error = "Password atau token otorisasi diperlukan untuk mengubah profesi." }, statusCode: 401);
+                }
+
+                bool valid = (TryGetSession(passwordOrToken, out var sess) && sess.Username.Equals(username, StringComparison.OrdinalIgnoreCase)) || await _dbService.VerifyPasswordAsync(username, passwordOrToken);
+                if (!valid)
+                {
+                    return Results.Json(new { error = "Kredensial tidak valid untuk akun ini." }, statusCode: 401);
+                }
+            }
+
             var user = await _dbService.GetUserAsync(username);
             if (user == null)
             {
-                user = await _dbService.RegisterUserAsync(username, Guid.NewGuid().ToString("N"), "Host");
-                if (user != null)
-                {
-                    await _dbService.LockProfessionAsync(user.Id, newProf.ToLowerInvariant());
-                    return Results.Ok(new { success = true, message = $"Profesi berhasil disetel ke {newProf.ToUpper()}!", feeDeducted = 0 });
-                }
                 return Results.NotFound(new { error = "User tidak ditemukan." });
             }
 
@@ -1467,7 +1792,7 @@ public static class KestrelWebServer
             var onlineFarmer = ResolveOnlineFarmer(user);
             if (onlineFarmer != null)
             {
-                walletGold = onlineFarmer.Money;
+                walletGold = World.FarmerWalletHelper.GetMoney(onlineFarmer);
             }
 
             var result = await _dbService.ChangeProfessionAsync(user.Id, newProf, isAdminOverride: false, walletGold);
@@ -1481,7 +1806,7 @@ public static class KestrelWebServer
                 var f = ResolveOnlineFarmer(user);
                 if (f != null)
                 {
-                    f.Money = Math.Max(0, f.Money - result.feeDeducted);
+                    World.FarmerWalletHelper.DeductMoney(f, result.feeDeducted);
                     f.modData["svheadless/profession"] = newProf.ToLowerInvariant();
                 }
             });
@@ -1537,65 +1862,75 @@ public static class KestrelWebServer
             });
         });
         // 19. World Knowledge & All-Sprite Mapping APIs (Tahap 4)
-        app.MapGet("/api/v2/world/locations", () =>
+        app.MapGet("/api/v2/world/locations", async () =>
         {
-            var locations = new List<object>();
-            if (Game1.locations != null)
+            var locations = await ServerHost.EnqueueMainThreadFuncAsync(() =>
             {
-                foreach (var loc in Game1.locations)
+                var list = new List<object>();
+                if (Game1.locations != null)
                 {
-                    if (loc == null) continue;
-                    string name = loc.NameOrUniqueName ?? loc.Name ?? "Unknown";
-                    int w = 80;
-                    int h = 65;
-                    try
+                    foreach (var loc in Game1.locations)
                     {
-                        if (loc.Map?.Layers != null && loc.Map.Layers.Count > 0 && loc.Map.Layers[0] != null)
+                        if (loc == null) continue;
+                        string name = loc.NameOrUniqueName ?? loc.Name ?? "Unknown";
+                        int w = 80;
+                        int h = 65;
+                        try
                         {
-                            w = loc.Map.Layers[0].LayerWidth;
-                            h = loc.Map.Layers[0].LayerHeight;
+                            if (loc.Map?.Layers != null && loc.Map.Layers.Count > 0 && loc.Map.Layers[0] != null)
+                            {
+                                w = loc.Map.Layers[0].LayerWidth;
+                                h = loc.Map.Layers[0].LayerHeight;
+                            }
                         }
+                        catch { }
+
+                        list.Add(new
+                        {
+                            name,
+                            displayName = loc.DisplayName ?? name,
+                            isFarm = loc is Farm,
+                            width = w,
+                            height = h,
+                            charactersCount = loc.characters?.Count ?? 0,
+                            farmersCount = loc.farmers?.Count ?? 0,
+                            objectsCount = loc.Objects?.Count() ?? 0
+                        });
                     }
-                    catch { }
-
-                    locations.Add(new
-                    {
-                        name,
-                        displayName = loc.DisplayName ?? name,
-                        isFarm = loc is Farm,
-                        width = w,
-                        height = h,
-                        charactersCount = loc.characters?.Count ?? 0,
-                        farmersCount = loc.farmers?.Count ?? 0,
-                        objectsCount = loc.Objects?.Count() ?? 0
-                    });
                 }
-            }
 
-            if (locations.Count == 0)
-            {
-                locations.Add(new { name = "Farm", displayName = "Peternakan", isFarm = true, width = 80, height = 65, charactersCount = 0, farmersCount = 0, objectsCount = 0 });
-            }
+                if (list.Count == 0)
+                {
+                    list.Add(new { name = "Farm", displayName = "Peternakan", isFarm = true, width = 80, height = 65, charactersCount = 0, farmersCount = 0, objectsCount = 0 });
+                }
+                return list;
+            });
 
             return Results.Ok(locations);
         });
 
-        app.MapGet("/api/v2/world/entities", (string? location) =>
+        app.MapGet("/api/v2/world/entities", async (string? location) =>
         {
             string targetLoc = string.IsNullOrWhiteSpace(location) ? "Farm" : location.Trim();
-            GameLocation? loc = null;
-            if (Game1.locations != null)
+            var snapshot = await ServerHost.EnqueueMainThreadFuncAsync(() =>
             {
-                loc = Game1.getLocationFromName(targetLoc);
-            }
-            loc ??= Game1.getFarm();
-            var snapshot = WorldEntityScanner.ScanLocation(loc);
+                GameLocation? loc = null;
+                if (Game1.locations != null)
+                {
+                    loc = Game1.getLocationFromName(targetLoc);
+                }
+                loc ??= Game1.getFarm();
+                return WorldEntityScanner.ScanLocation(loc);
+            });
             return Results.Ok(snapshot);
         });
 
-        app.MapGet("/api/v2/world/summary", () =>
+        app.MapGet("/api/v2/world/summary", async () =>
         {
-            var summary = WorldEntityScanner.GenerateWorldSummary(Game1.getFarm());
+            var summary = await ServerHost.EnqueueMainThreadFuncAsync(() =>
+            {
+                return WorldEntityScanner.GenerateWorldSummary(Game1.getFarm());
+            });
             return Results.Ok(summary);
         });
 

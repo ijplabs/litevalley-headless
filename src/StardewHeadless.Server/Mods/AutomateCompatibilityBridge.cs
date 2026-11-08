@@ -4,6 +4,7 @@ using System.Linq;
 using Microsoft.Xna.Framework;
 using StardewValley;
 using StardewValley.Objects;
+using StardewHeadless.Server.World;
 
 namespace StardewHeadless.Server.Mods;
 
@@ -32,19 +33,19 @@ public static class AutomateCompatibilityBridge
         if (chest == null) return false;
 
         // 1. Peti komunal desa selalu dapat diotomasi untuk kemakmuran bersama
-        if (chest.modData.ContainsKey("svheadless/community_storage") || chest.modData.ContainsKey("svheadless/is_communal"))
+        if (chest.modData.ContainsKey(ModDataKeys.CommunityStorage) || chest.modData.ContainsKey(ModDataKeys.IsCommunal))
         {
             return true;
         }
 
         // 2. Peti terkunci sementara (misal sedang dibuka atau dikunci PIN) diblokir dari automasi
-        if (chest.modData.ContainsKey("svheadless/locked_by"))
+        if (chest.modData.ContainsKey(ModDataKeys.LockedBy))
         {
             return false;
         }
 
         // 3. Peti privat milik pemain
-        if (chest.modData.TryGetValue("svheadless/private_owner", out var ownerStr) || chest.modData.TryGetValue("svheadless/chest_owner", out ownerStr) || chest.modData.TryGetValue("svheadless/owner_id", out ownerStr))
+        if (chest.modData.TryGetValue(ModDataKeys.PrivateOwner, out var ownerStr) || chest.modData.TryGetValue(ModDataKeys.ChestOwner, out ownerStr) || chest.modData.TryGetValue(ModDataKeys.OwnerId, out ownerStr))
         {
             if (long.TryParse(ownerStr, out var ownerId))
             {
@@ -104,7 +105,7 @@ public static class AutomateCompatibilityBridge
 
                 if (connectedMachines.Count > 0)
                 {
-                    bool isPrivate = chest.modData.ContainsKey("svheadless/private_owner") || chest.modData.ContainsKey("svheadless/locked_by");
+                    bool isPrivate = chest.modData.ContainsKey(ModDataKeys.PrivateOwner) || chest.modData.ContainsKey(ModDataKeys.LockedBy);
                     int itemsCount = chest.Items?.Count(i => i != null) ?? 0;
 
                     result.Add(new AutomateGroupInfo(

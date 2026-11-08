@@ -270,8 +270,18 @@ public class ModManagerService
 
             using (var archive = new ZipArchive(zipStream, ZipArchiveMode.Read))
             {
+                const int MaxArchiveEntries = 5000;
+                const long MaxUncompressedBytes = 350 * 1024 * 1024;
+                if (archive.Entries.Count > MaxArchiveEntries) throw new InvalidOperationException($"Arsip zip mod memiliki terlalu banyak file ({archive.Entries.Count} > {MaxArchiveEntries}).");
+                long totalUncompressedBytes = 0;
+                long totalActualExtractedBytes = 0;
+                byte[] copyBuffer = new byte[65536];
+
                 foreach (var entry in archive.Entries)
                 {
+                    totalUncompressedBytes += entry.Length;
+                    if (totalUncompressedBytes > MaxUncompressedBytes) throw new InvalidOperationException("Ukuran total ekstraksi zip mod melebihi batas 350 MB.");
+
                     // Proteksi Keamanan 1: Zip-Slip Vulnerability Guard (dengan Trailing Separator)
                     string safeBaseDir = Path.GetFullPath(tempExtractDir);
                     if (!safeBaseDir.EndsWith(Path.DirectorySeparatorChar))
@@ -305,7 +315,18 @@ public class ModManagerService
                         {
                             Directory.CreateDirectory(parentDir);
                         }
-                        entry.ExtractToFile(destinationPath, overwrite: true);
+                        using var entryStream = entry.Open();
+                        using var outStream = new FileStream(destinationPath, FileMode.Create, FileAccess.Write, FileShare.None);
+                        int bytesRead;
+                        while ((bytesRead = await entryStream.ReadAsync(copyBuffer, 0, copyBuffer.Length)) > 0)
+                        {
+                            totalActualExtractedBytes += bytesRead;
+                            if (totalActualExtractedBytes > MaxUncompressedBytes)
+                            {
+                                throw new InvalidOperationException("Deteksi Zip-Bomb: ukuran aktual ekstraksi zip mod melebihi batas kuota 350 MB.");
+                            }
+                            await outStream.WriteAsync(copyBuffer, 0, bytesRead);
+                        }
                     }
                 }
             }

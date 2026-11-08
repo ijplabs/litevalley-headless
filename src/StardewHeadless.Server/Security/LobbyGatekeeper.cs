@@ -21,6 +21,7 @@ public class ClientAuthState
     public string LockedProfession { get; set; } = string.Empty;
     public string? SessionToken { get; set; }
     public DateTime ConnectedAt { get; set; } = DateTime.UtcNow;
+    public bool ShouldGrantStarterKit { get; set; }
 }
 
 public static class LobbyGatekeeper
@@ -366,6 +367,8 @@ public static class LobbyGatekeeper
             }
         }
 
+        ClientAuthState authState;
+
         // ====================================================================
         // KASUS 1: Registrasi Akun Baru (User Belum Terdaftar)
         // ====================================================================
@@ -420,12 +423,13 @@ public static class LobbyGatekeeper
             }
 
             var newSessionToken = IssueSessionToken(newUser.Id, submit.FarmerId);
-            var authState = _clients.GetOrAdd(submit.FarmerId, id => new ClientAuthState { FarmerId = id });
+            authState = _clients.GetOrAdd(submit.FarmerId, id => new ClientAuthState { FarmerId = id });
             authState.IsAuthenticated = true;
             authState.Username = username;
             authState.AssignedCabinIndex = assignedCabinIndex;
             authState.LockedProfession = requestedProf;
             authState.SessionToken = newSessionToken;
+            authState.ShouldGrantStarterKit = true;
 
             LobbyCabinManager.WarpPlayerFromLobby(submit.FarmerId, farmer);
             _logger?.Info("LobbyGatekeeper", $"Registrasi SUKSES! '{username}' resmi menjadi '{requestedProf.ToUpper()}' di Kabin #{assignedCabinIndex}. Pintu world dibuka!");
@@ -569,9 +573,17 @@ public static class LobbyGatekeeper
             await db.AssignCabinAsync(existingUser.Id, cabinIdx, $"Cabin {cabinIdx}");
         }
 
+        var sessionToken = IssueSessionToken(existingUser.Id, submit.FarmerId);
+        authState = _clients.GetOrAdd(submit.FarmerId, id => new ClientAuthState { FarmerId = id });
+        authState.IsAuthenticated = true;
+        authState.Username = username;
+        authState.AssignedCabinIndex = cabinIdx;
+        authState.SessionToken = sessionToken;
+
         // Ambil profesi permanen & serahkan starter kit jika belum pernah diambil
         var userProf = await db.GetProfessionAsync(existingUser.Id);
         var lockedProf = userProf?.ProfessionType ?? "farmer";
+        authState.LockedProfession = lockedProf;
 
         if (farmer != null)
         {
@@ -581,6 +593,7 @@ public static class LobbyGatekeeper
             {
                 var delivered = StarterKitDelivery.DeliverKit(farmer, lockedProf);
                 await db.ClaimStarterKitAsync(existingUser.Id);
+                authState.ShouldGrantStarterKit = true;
                 _logger?.Info("StarterKit", $"Starter kit '{lockedProf}' diserahkan ke '{username}': {string.Join(", ", delivered)}");
             }
         }
@@ -595,14 +608,6 @@ public static class LobbyGatekeeper
         }
 
         await db.UpdateLastLoginAsync(existingUser.Id);
-
-        var sessionToken = IssueSessionToken(existingUser.Id, submit.FarmerId);
-        var existingAuthState = _clients.GetOrAdd(submit.FarmerId, id => new ClientAuthState { FarmerId = id });
-        existingAuthState.IsAuthenticated = true;
-        existingAuthState.Username = username;
-        existingAuthState.AssignedCabinIndex = cabinIdx;
-        existingAuthState.LockedProfession = lockedProf;
-        existingAuthState.SessionToken = sessionToken;
 
         LobbyCabinManager.WarpPlayerFromLobby(submit.FarmerId, farmer);
         _logger?.Info("LobbyGatekeeper", $"Login SUKSES! Selamat datang kembali '{username}' ({lockedProf.ToUpper()}) di Kabin #{cabinIdx}.");

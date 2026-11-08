@@ -132,6 +132,9 @@ public static class HeadlessNetworkPatches
             long farmerId = farmer.Value.UniqueMultiplayerID;
             string clientName = string.IsNullOrWhiteSpace(farmer.Value.Name) ? "Farmer" : farmer.Value.Name;
 
+            // Start audit deadline (12s) to ensure client sends mod audit (MOD-05)
+            BridgeProtocolRouter.StartAuditDeadline(Game1.server, farmerId);
+
             Task.Run(async () =>
             {
                 try
@@ -141,17 +144,23 @@ public static class HeadlessNetworkPatches
                     {
                         // Pemain lama yang sudah terdaftar & terautentikasi (reconnect)
                         await Task.Delay(1000);
-                        Game1.Multiplayer?.sendChatMessage(
-                            LocalizedContentManager.LanguageCode.en,
-                            $"[SERVER] Selamat datang kembali di Lembah, {clientName}! (Profesi: {authState.LockedProfession.ToUpper()})",
-                            farmerId
-                        );
+                        ServerHost.EnqueueMainThreadAction(() =>
+                        {
+                            Game1.Multiplayer?.sendChatMessage(
+                                LocalizedContentManager.LanguageCode.en,
+                                $"[SERVER] Selamat datang kembali di Lembah, {clientName}! (Profesi: {authState.LockedProfession.ToUpper()})",
+                                farmerId
+                            );
+                        });
                         return;
                     }
 
                     // Pemain baru dalam karantina lobby
                     await Task.Delay(1500);
-                    LobbyGatekeeper.SendQuarantineWelcomeNotice(farmerId, clientName);
+                    ServerHost.EnqueueMainThreadAction(() =>
+                    {
+                        LobbyGatekeeper.SendQuarantineWelcomeNotice(farmerId, clientName);
+                    });
                 }
                 catch
                 {

@@ -1,0 +1,26 @@
+[package]
+name = "litevalley-broadcaster"
+version = "0.1.0"
+edition = "2021"
+authors = ["LiteValley Cloud Team"]
+description = "High-performance 2D radar and SSE/WebSocket fan-out broadcast hub for LiteValley Stardew Headless Server"
+
+[dependencies]
+tokio = { version = "1.43", features = ["full"] }
+axum = { version = "0.8", features = ["ws"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+clap = { version = "4.5", features = ["derive", "env"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+futures-util = "0.3"
+pin-project-lite = "0.2"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
