@@ -5,6 +5,11 @@ edition = "2021"
 authors = ["LiteValley Cloud Team"]
 description = "Zero-allocation savegame inspector, fast XML streamer, and chunked backup engine for Stardew Valley 1.6"
 
+[lib]
+name = "litevalley_save_engine"
+path = "src/lib.rs"
+crate-type = ["rlib", "cdylib"]
+
 [dependencies]
 quick-xml = { version = "0.37", features = ["serialize"] }
 zip = { version = "2.2", default-features = false, features = ["deflate", "time"] }
